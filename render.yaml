@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: aivoice-agent
+    runtime: docker
+    plan: free                         # upgrade to starter ($7/mo) for always-on
+    branch: main
+    dockerfilePath: ./server/Dockerfile
+    dockerContext: ./server
+    envVars:
+      - key: LLM_PROVIDER
+        value: together
+      - key: LLM_MODEL
+        value: meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo
+      - key: TTS_PROVIDER
+        value: elevenlabs
+      - key: PUBLIC_WS_URL
+        sync: false                   # set in Render dashboard after deploy
+      - key: DEEPGRAM_API_KEY
+        sync: false
+      - key: LLM_API_KEY
+        sync: false
+      - key: ELEVENLABS_API_KEY
+        sync: false
+    healthCheckPath: /health
