@@ -582,15 +582,15 @@ async def twilio_voice_webhook():
 @app.post("/telnyx/voice")
 async def telnyx_voice_webhook():
     """Return Telnyx TeXML that opens a bidirectional µ-law WebSocket stream."""
-    ws_url = os.environ.get("PUBLIC_WSS_URL") or os.environ.get("PUBLIC_WS_URL", "wss://your-app.onrender.com/telnyx/ws")
+    ws_url = os.environ.get("PUBLIC_WSS_URL") or os.environ.get("PUBLIC_WS_URL", "wss://your-app.onrender.com/ws")
     # Force wss scheme for WebSocket
     if ws_url.startswith("https://"):
         ws_url = "wss://" + ws_url[len("https://"):]
-    # Strip trailing /ws if the env has the generic ws path so we can append /telnyx/ws
+    # Strip trailing /ws if the env has the generic ws path so we can append /ws
     if ws_url.endswith("/ws"):
         ws_url = ws_url[:-3]
-    if not ws_url.endswith("/telnyx/ws"):
-        ws_url = ws_url.rstrip("/") + "/telnyx/ws"
+    if not ws_url.endswith("/ws"):
+        ws_url = ws_url.rstrip("/") + "/ws"
 
     texml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
