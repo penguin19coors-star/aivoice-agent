@@ -25,6 +25,27 @@ from pydantic import BaseModel
 import httpx as _http
 import websockets
 
+
+async def ws_connect(url: str, headers: Optional[Dict[str, str]] = None, **kwargs):
+    """Open a websockets client connection across library versions.
+
+    websockets renamed the header kwarg over time: legacy/new builds expose
+    either ``additional_headers`` or ``extra_headers``, and the top-level
+    ``websockets.connect`` in some 1x releases forwards unknown kwargs straight
+    into asyncio's ``create_connection`` (raising TypeError). Try the modern
+    name first, fall back to the legacy name, then fall back to no headers.
+    """
+    if headers:
+        try:
+            return await websockets.connect(url, additional_headers=headers, **kwargs)
+        except TypeError:
+            pass
+        try:
+            return await websockets.connect(url, extra_headers=headers, **kwargs)
+        except TypeError:
+            pass
+    return await websockets.connect(url, **kwargs)
+
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("aivoice")
 
@@ -180,7 +201,7 @@ class Session:
                 "Authorization": f"Token {DEEPGRAM_API_KEY}",
                 "Content-Type": "application/json",
             }
-            self.dg_ws = await websockets.connect(url, additional_headers=headers, close_timeout=5)
+            self.dg_ws = await ws_connect(url, headers=headers, close_timeout=5)
         return self.dg_ws
 
 
@@ -518,9 +539,8 @@ async def tts_stream(reply_text: str, websocket: WebSocket):
             },
             "language": "en",
         }
-        async with websockets.connect(
-            url, additional_headers=headers, close_timeout=5
-        ) as ws:
+        ws = await ws_connect(url, headers=headers, close_timeout=5)
+        try:
             await ws.send(json.dumps(payload))
             while True:
                 try:
@@ -539,6 +559,8 @@ async def tts_stream(reply_text: str, websocket: WebSocket):
                     if data.get("error"):
                         log.warning(f"[tts:cartesia] {data.get('error')}")
                         break
+        finally:
+            await ws.close()
 
     await websocket.send_json({"type": "audio_done"})
 
@@ -717,7 +739,8 @@ async def _cartesia_ulaw_stream(text: str) -> Any:
         "output_format": {"encoding": "mulaw", "sample_rate": 8000},
         "language": "en",
     }
-    async with websockets.connect(url, additional_headers=headers, close_timeout=5) as ws:
+    ws = await ws_connect(url, headers=headers, close_timeout=5)
+    try:
         await ws.send(json.dumps(payload))
         while True:
             try:
@@ -736,6 +759,8 @@ async def _cartesia_ulaw_stream(text: str) -> Any:
                 if data.get("error"):
                     log.warning(f"[tts:cartesia] {data.get('error')}")
                     break
+    finally:
+        await ws.close()
 
 
 # Keep Twilio/WebSocket handler and remaining server code.
