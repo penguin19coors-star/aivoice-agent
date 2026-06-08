@@ -13,9 +13,6 @@ import logging
 import html
 import asyncio
 import threading
-import logging
-import html
-import asyncio
 from datetime import datetime, timezone
 from dataclasses import dataclass, field, asdict
 from typing import Optional, List, Dict, Any
@@ -428,7 +425,10 @@ LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
 LLM_BASE = os.environ.get("LLM_BASE_URL", "https://api.together.xyz/v1")
 LLM_MODEL = os.environ.get("LLM_MODEL", "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo")
 
-TTS_PROVIDER = os.environ.get("TTS_PROVIDER", "elevenlabs")
+TTS_PROVIDER = os.environ.get("TTS_PROVIDER", "cartesia")  # cartesia | elevenlabs | openai | deepgram
+CARTESIA_API_KEY = os.environ.get("CARTESIA_API_KEY", "")
+CARTESIA_VOICE = os.environ.get("CARTESIA_VOICE", "a79a1ab6-270d-4b3e-b14e-35e35dc18dbb")
+CARTESIA_MODEL = os.environ.get("CARTESIA_MODEL", "sonic-english")
 ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY", "")
 ELEVENLABS_VOICE = os.environ.get("ELEVENLABS_VOICE", "Rachel")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
@@ -474,39 +474,14 @@ async def call_llm(session: Session, user_text: str) -> str:
 
 
 async def tts_stream(reply_text: str, websocket: WebSocket):
+    """Stream TTS audio as Twilio µ-law chunks.
+    Provider-default is Cartesia; cheaper than ElevenLabs and outputs µ-law natively.
+    """
     text = re.sub(r"\*\*.*?\*\*", lambda m: m.group(0).replace("*", ""), reply_text)
     text = re.sub(r"[*#`_\[\]()]", "", text)
     text = text.replace("\n", " ")
 
-    if TTS_PROVIDER == "openai":
-        url = "https://api.openai.com/v1/audio/speech"
-        headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
-        payload = {
-            "model": "tts-1",
-            "input": text,
-            "voice": OPENAI_TTS_VOICE,
-            "response_format": "mp3",
-        }
-        r = http.post(url, headers=headers, json=payload)
-        r.raise_for_status()
-        mp3 = r.content
-        import subprocess, tempfile
-        with tempfile.NamedTemporaryFile(suffix=".mp3") as src, \
-             tempfile.NamedTemporaryFile(suffix=".wav") as dst:
-            src.write(mp3); src.flush()
-            subprocess.run(
-                ["ffmpeg", "-y", "-i", src.name, "-ar", "8000", "-ac", "1", "-f", "wav", dst.name],
-                capture_output=True,
-            )
-            wav = open(dst.name, "rb").read()
-        import audioop
-        pcm = wav[44:]
-        mulaw = audioop.lin2ulaw(pcm, 2)
-        CHUNK = 320
-        for i in range(0, len(mulaw), CHUNK):
-            await websocket.send_bytes(mulaw[i:i + CHUNK])
-
-    elif TTS_PROVIDER == "deepgram":
+    if TTS_PROVIDER == "deepgram":
         url = "https://api.deepgram.com/v1/speak?model=aura-asteria-en&encoding=mulaw&sample_rate=8000"
         headers = {
             "Authorization": f"Token {DEEPGRAM_API_KEY}",
@@ -517,7 +492,7 @@ async def tts_stream(reply_text: str, websocket: WebSocket):
             for chunk in r.iter_bytes():
                 await websocket.send_bytes(chunk)
 
-    else:  # elevenlabs default
+    elif TTS_PROVIDER == "elevenlabs":
         url = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE}/stream"
         headers = {"xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json"}
         payload = {
@@ -529,6 +504,41 @@ async def tts_stream(reply_text: str, websocket: WebSocket):
             r.raise_for_status()
             for chunk in r.iter_bytes():
                 await websocket.send_bytes(chunk)
+
+    else:  # cartesia default
+        url = "wss://api.cartesia.ai/tts/websocket"
+        headers = {"Cartesia-Version": "2024-06-10"}
+        payload = {
+            "model_id": CARTESIA_MODEL,
+            "transcript": text,
+            "voice": {"mode": "id", "id": CARTESIA_VOICE},
+            "output_format": {
+                "encoding": "mulaw",
+                "sample_rate": 8000,
+            },
+            "language": "en",
+        }
+        async with websockets.connect(
+            url, additional_headers=headers, close_timeout=5
+        ) as ws:
+            await ws.send(json.dumps(payload))
+            while True:
+                try:
+                    msg = await asyncio.wait_for(ws.recv(), timeout=8)
+                except asyncio.TimeoutError:
+                    break
+                if isinstance(msg, bytes):
+                    await websocket.send_bytes(msg)
+                else:
+                    try:
+                        data = json.loads(msg)
+                    except Exception:
+                        continue
+                    if data.get("event") == "done":
+                        break
+                    if data.get("error"):
+                        log.warning(f"[tts:cartesia] {data.get('error')}")
+                        break
 
     await websocket.send_json({"type": "audio_done"})
 
@@ -569,7 +579,161 @@ async def twilio_voice_webhook():
     return PlainTextResponse(twiml, media_type="application/xml")
 
 
-@app.websocket("/ws")
+@app.post("/telnyx/voice")
+async def telnyx_voice_webhook():
+    """Return Telnyx TeXML that opens a bidirectional µ-law WebSocket stream."""
+    ws_url = os.environ.get("PUBLIC_WSS_URL") or os.environ.get("PUBLIC_WS_URL", "wss://your-app.onrender.com/telnyx/ws")
+    # Strip trailing /ws if the env has the generic ws path so we can append /telnyx/ws
+    if ws_url.endswith("/ws"):
+        ws_url = ws_url[:-3]
+    if not ws_url.endswith("/telnyx/ws"):
+        ws_url = ws_url.rstrip("/") + "/telnyx/ws"
+
+    texml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Connect>
+    <Stream url="{ws_url}" bidirectionalMode="rtp" contentType="audio/x-mulaw;rate=8000" />
+  </Connect>
+  <Pause length="40"/>
+</Response>"""
+    return PlainTextResponse(texml, media_type="application/xml")
+
+
+@app.websocket("/telnyx/ws")
+async def telnyx_websocket_endpoint(websocket: WebSocket):
+    """Telnyx media streaming over WebSocket with bidirectional RTP.
+    Inbound audio from the caller arrives as raw µ-law bytes.
+    Outbound audio to the caller is pumped back as raw µ-law bytes.
+    """
+    await websocket.accept()
+    session_id = str(uuid.uuid4())
+    session = Session(session_id=session_id)
+    sessions[session_id] = session
+    log.info(f"[telnyx] ws connected session={session_id}")
+
+    stream_id: Optional[str] = None
+    call_control_id: Optional[str] = None
+    caller_num: Optional[str] = None
+    media_buffer = bytearray()
+    awaiting_start = True
+
+    async def _send_outbound(text: str):
+        nonlocal stream_id
+        if not stream_id:
+            return
+        # Produce µ-law and send raw bytes back to Telnyx.
+        outbound_buffer = bytearray()
+        async for chunk in _cartesia_ulaw_stream(text):
+            outbound_buffer.extend(chunk)
+        if outbound_buffer:
+            await websocket.send_bytes(bytes(outbound_buffer))
+
+    try:
+        while True:
+            raw = await websocket.receive()
+
+            if "text" in raw:
+                msg = json.loads(raw["text"])
+                event = msg.get("event")
+
+                if event == "connected":
+                    log.info(f"[telnyx] connected session={session_id}")
+
+                elif event == "start":
+                    awaiting_start = False
+                    stream_id = msg.get("stream_id") or msg.get("start", {}).get("stream_id") or msg.get("streamId")
+                    call_control_id = msg.get("call_control_id") or msg.get("start", {}).get("call_control_id")
+                    caller_num = msg.get("from") or msg.get("start", {}).get("from")
+                    session.caller_id = caller_num or ""
+                    session.segment = SEGMENT_TAGS.get(session.caller_id, [])
+                    mf = msg.get("start", {}).get("media_format", {})
+                    encoding = mf.get("encoding", "PCMU")
+                    sample_rate = mf.get("sample_rate", 8000)
+                    session.metadata["telnyx_encoding"] = encoding
+                    session.metadata["telnyx_sample_rate"] = sample_rate
+                    log.info(
+                        f"[telnyx] stream start stream_id={stream_id} "
+                        f"call_control_id={call_control_id} caller={caller_num} "
+                        f"encoding={encoding} rate={sample_rate}"
+                    )
+
+                elif event == "stop":
+                    log.info(f"[telnyx] stream stopped stream_id={stream_id}")
+                    break
+
+                elif event == "media":
+                    if awaiting_start or not stream_id:
+                        continue
+                    if msg.get("media", {}).get("track") not in (None, "inbound"):
+                        continue
+                    payload = msg.get("media", {}).get("payload")
+                    if not payload:
+                        continue
+                    chunk = __import__("base64").b64decode(payload)
+                    media_buffer.extend(chunk)
+
+                    if len(media_buffer) >= 240:
+                        to_send, media_buffer = bytes(media_buffer[:240]), media_buffer[240:]
+                        await process_speech(to_send, session, websocket, stream_id or "")
+
+            elif "bytes" in raw:
+                # In bidirectional RTP mode, inbound audio arrives as raw bytes.
+                if awaiting_start or not stream_id:
+                    continue
+                media_buffer.extend(raw["bytes"])
+                if len(media_buffer) >= 240:
+                    to_send, media_buffer = bytes(media_buffer[:240]), media_buffer[240:]
+                    await process_speech(to_send, session, websocket, stream_id or "")
+
+    except WebSocketDisconnect:
+        log.info(f"[telnyx] disconnected session={session_id}")
+    except Exception as exc:
+        log.error(f"[telnyx] error session={session_id} exc={exc}")
+    finally:
+        session.ended_at = time.time()
+        duration = (session.ended_at - session.created_at) if session.ended_at and session.created_at else 0
+        session_dur_tag = f"dur={duration:.1f}s"
+        log.info(
+            f"[session] ended id={session_id} {session_dur_tag} "
+            f"transcript_turns={len(session.transcript)} ads={session.ads_played}"
+        )
+
+
+async def _cartesia_ulaw_stream(text: str) -> Any:
+    """Yield µ-law bytes from Cartesia for outbound audio."""
+    cleaned = re.sub(r"\*\*.*?\*\*", lambda m: m.group(0).replace("*", ""), text)
+    cleaned = re.sub(r"[*#`_\[\]()]", "", cleaned).replace("\n", " ")
+    url = "wss://api.cartesia.ai/tts/websocket"
+    headers = {"Cartesia-Version": "2024-06-10"}
+    payload = {
+        "model_id": CARTESIA_MODEL,
+        "transcript": cleaned,
+        "voice": {"mode": "id", "id": CARTESIA_VOICE},
+        "output_format": {"encoding": "mulaw", "sample_rate": 8000},
+        "language": "en",
+    }
+    async with websockets.connect(url, additional_headers=headers, close_timeout=5) as ws:
+        await ws.send(json.dumps(payload))
+        while True:
+            try:
+                msg = await asyncio.wait_for(ws.recv(), timeout=8)
+            except asyncio.TimeoutError:
+                break
+            if isinstance(msg, bytes):
+                yield msg
+            else:
+                try:
+                    data = json.loads(msg)
+                except Exception:
+                    continue
+                if data.get("event") == "done":
+                    break
+                if data.get("error"):
+                    log.warning(f"[tts:cartesia] {data.get('error')}")
+                    break
+
+
+# Keep Twilio/WebSocket handler and remaining server code.@app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     session_id = str(uuid.uuid4())
