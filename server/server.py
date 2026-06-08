@@ -582,15 +582,17 @@ async def twilio_voice_webhook():
 @app.post("/telnyx/voice")
 async def telnyx_voice_webhook():
     """Return Telnyx TeXML that opens a bidirectional µ-law WebSocket stream."""
-    ws_url = os.environ.get("PUBLIC_WSS_URL") or os.environ.get("PUBLIC_WS_URL", "wss://your-app.onrender.com/ws")
+    ws_url = os.environ.get("PUBLIC_WSS_URL") or os.environ.get("PUBLIC_WS_URL", "wss://your-app.onrender.com")
     # Force wss scheme for WebSocket
     if ws_url.startswith("https://"):
         ws_url = "wss://" + ws_url[len("https://"):]
-    # Strip trailing /ws if the env has the generic ws path so we can append /ws
-    if ws_url.endswith("/ws"):
-        ws_url = ws_url[:-3]
-    if not ws_url.endswith("/ws"):
-        ws_url = ws_url.rstrip("/") + "/ws"
+    # Normalize to the dedicated Telnyx WebSocket route /telnyx/ws
+    if ws_url.endswith("/telnyx/ws"):
+        pass
+    elif ws_url.endswith("/ws"):
+        ws_url = ws_url[: -len("/ws")].rstrip("/") + "/telnyx/ws"
+    else:
+        ws_url = ws_url.rstrip("/") + "/telnyx/ws"
 
     texml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -736,7 +738,8 @@ async def _cartesia_ulaw_stream(text: str) -> Any:
                     break
 
 
-# Keep Twilio/WebSocket handler and remaining server code.@app.websocket("/ws")
+# Keep Twilio/WebSocket handler and remaining server code.
+@app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     session_id = str(uuid.uuid4())
