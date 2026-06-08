@@ -527,8 +527,11 @@ async def tts_stream(reply_text: str, websocket: WebSocket):
                 await websocket.send_bytes(chunk)
 
     else:  # cartesia default
-        url = "wss://api.cartesia.ai/tts/websocket"
-        headers = {"Cartesia-Version": "2024-06-10"}
+        url = (
+            "wss://api.cartesia.ai/tts/websocket"
+            f"?api_key={CARTESIA_API_KEY}&cartesia_version=2024-06-10"
+        )
+        headers = {"Cartesia-Version": "2024-06-10", "X-API-Key": CARTESIA_API_KEY}
         payload = {
             "model_id": CARTESIA_MODEL,
             "transcript": text,
@@ -752,8 +755,11 @@ async def _cartesia_ulaw_stream(text: str) -> Any:
     """Yield µ-law bytes from Cartesia for outbound audio."""
     cleaned = re.sub(r"\*\*.*?\*\*", lambda m: m.group(0).replace("*", ""), text)
     cleaned = re.sub(r"[*#`_\[\]()]", "", cleaned).replace("\n", " ")
-    url = "wss://api.cartesia.ai/tts/websocket"
-    headers = {"Cartesia-Version": "2024-06-10"}
+    url = (
+        "wss://api.cartesia.ai/tts/websocket"
+        f"?api_key={CARTESIA_API_KEY}&cartesia_version=2024-06-10"
+    )
+    headers = {"Cartesia-Version": "2024-06-10", "X-API-Key": CARTESIA_API_KEY}
     payload = {
         "model_id": CARTESIA_MODEL,
         "transcript": cleaned,
