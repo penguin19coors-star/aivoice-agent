@@ -643,17 +643,32 @@ async def telnyx_websocket_endpoint(websocket: WebSocket):
     caller_num: Optional[str] = None
     media_buffer = bytearray()
     awaiting_start = True
+    _b64 = __import__("base64")
 
     async def _send_outbound(text: str):
         nonlocal stream_id
         if not stream_id:
             return
-        # Produce µ-law and send raw bytes back to Telnyx.
+        # Collect µ-law audio from Cartesia, then send it back to Telnyx as
+        # JSON "media" events with base64 payload, chunked into 160-byte
+        # (~20ms @ 8kHz PCMU) frames. Telnyx expects this JSON format even in
+        # bidirectional mode — raw WebSocket bytes are NOT played.
         outbound_buffer = bytearray()
         async for chunk in _cartesia_ulaw_stream(text):
             outbound_buffer.extend(chunk)
-        if outbound_buffer:
-            await websocket.send_bytes(bytes(outbound_buffer))
+        if not outbound_buffer:
+            return
+        frame = 160
+        for i in range(0, len(outbound_buffer), frame):
+            payload = bytes(outbound_buffer[i:i + frame])
+            b64 = _b64.b64encode(payload).decode("ascii")
+            await websocket.send_text(json.dumps({
+                "event": "media",
+                "stream_id": stream_id,
+                "media": {"payload": b64},
+            }))
+            # pace slightly so Telnyx's jitter buffer plays smoothly
+            await asyncio.sleep(0.018)
 
     try:
         while True:
@@ -683,6 +698,13 @@ async def telnyx_websocket_endpoint(websocket: WebSocket):
                         f"call_control_id={call_control_id} caller={caller_num} "
                         f"encoding={encoding} rate={sample_rate}"
                     )
+                    # Greet the caller immediately so the call doesn't open silent.
+                    greeting = os.environ.get(
+                        "GREETING",
+                        "Hi! Thanks for calling. I'm your AI assistant. How can I help you today?",
+                    )
+                    session.transcript.append({"role": "assistant", "text": greeting, "ts": time.time()})
+                    asyncio.create_task(_send_outbound(greeting))
 
                 elif event == "stop":
                     log.info(f"[telnyx] stream stopped stream_id={stream_id}")
@@ -696,12 +718,12 @@ async def telnyx_websocket_endpoint(websocket: WebSocket):
                     payload = msg.get("media", {}).get("payload")
                     if not payload:
                         continue
-                    chunk = __import__("base64").b64decode(payload)
+                    chunk = _b64.b64decode(payload)
                     media_buffer.extend(chunk)
 
                     if len(media_buffer) >= 240:
                         to_send, media_buffer = bytes(media_buffer[:240]), media_buffer[240:]
-                        await process_speech(to_send, session, websocket, stream_id or "")
+                        await process_speech(to_send, session, websocket, stream_id or "", send_fn=_send_outbound)
 
             elif "bytes" in raw:
                 # In bidirectional RTP mode, inbound audio arrives as raw bytes.
@@ -710,7 +732,7 @@ async def telnyx_websocket_endpoint(websocket: WebSocket):
                 media_buffer.extend(raw["bytes"])
                 if len(media_buffer) >= 240:
                     to_send, media_buffer = bytes(media_buffer[:240]), media_buffer[240:]
-                    await process_speech(to_send, session, websocket, stream_id or "")
+                    await process_speech(to_send, session, websocket, stream_id or "", send_fn=_send_outbound)
 
     except WebSocketDisconnect:
         log.info(f"[telnyx] disconnected session={session_id}")
@@ -824,8 +846,12 @@ async def websocket_endpoint(websocket: WebSocket):
         )
 
 
-async def process_speech(chunk: bytes, session: Session, ws: WebSocket, stream_sid: str):
-    """Send chunk to a persistent Deepgram Live socket and await the final transcript."""
+async def process_speech(chunk: bytes, session: Session, ws: WebSocket, stream_sid: str, send_fn=None):
+    """Send chunk to a persistent Deepgram Live socket and await the final transcript.
+
+    send_fn: optional async callable(text) used to deliver outbound audio.
+    When provided (Telnyx path), it is used instead of the Twilio send_tts format.
+    """
     try:
         dg = await session.ensure_dg_ws()
         await dg.send(chunk)
@@ -864,17 +890,24 @@ async def process_speech(chunk: bytes, session: Session, ws: WebSocket, stream_s
     # Contextual news event injection (NewsAPI)
     event = await get_contextual_event(session)
     if event:
-        await send_tts(ws, stream_sid, event)
+        if send_fn:
+            await send_fn(event)
+        else:
+            await send_tts(ws, stream_sid, event)
         session.transcript.append({"role": "system", "text": event, "ts": time.time()})
 
     # LLM reply
     reply = await call_llm(session, transcript)
 
-    # Send audio + metadata hint to Twilio
-    await send_tts(ws, stream_sid, reply)
+    # Send audio back to the caller
+    if send_fn:
+        await send_fn(reply)
+    else:
+        await send_tts(ws, stream_sid, reply)
 
     if transcript.lower().strip() in {"goodbye", "bye", "stop", "end call", "hang up"}:
-        await ws.send_json({"type": "hangup"})
+        if not send_fn:
+            await ws.send_json({"type": "hangup"})
 
 
 async def send_tts(ws: WebSocket, stream_sid: str, text: str):
