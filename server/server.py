@@ -446,7 +446,7 @@ LLM_MODEL = os.environ.get("LLM_MODEL", "meta-llama/Meta-Llama-3.1-8B-Instruct-T
 TTS_PROVIDER = os.environ.get("TTS_PROVIDER", "cartesia")  # cartesia | elevenlabs | openai | deepgram
 CARTESIA_API_KEY = os.environ.get("CARTESIA_API_KEY", "")
 CARTESIA_VOICE = os.environ.get("CARTESIA_VOICE", "")  # empty => auto-resolve from account
-CARTESIA_MODEL = os.environ.get("CARTESIA_MODEL", "sonic-english")
+CARTESIA_MODEL = os.environ.get("CARTESIA_MODEL", "sonic-2")
 _resolved_voice: Optional[str] = None
 
 
@@ -559,7 +559,7 @@ async def tts_stream(reply_text: str, websocket: WebSocket):
     else:  # cartesia default — REST (POST /tts/bytes), matches Telnyx path
         url = "https://api.cartesia.ai/tts/bytes"
         headers = {
-            "Cartesia-Version": "2024-06-10",
+            "Cartesia-Version": "2024-11-13",
             "X-API-Key": CARTESIA_API_KEY,
             "Content-Type": "application/json",
         }
@@ -773,7 +773,7 @@ async def _cartesia_ulaw_stream(text: str) -> Any:
     cleaned = re.sub(r"[*#`_\[\]()]", "", cleaned).replace("\n", " ")
     url = "https://api.cartesia.ai/tts/bytes"
     headers = {
-        "Cartesia-Version": "2024-06-10",
+        "Cartesia-Version": "2024-11-13",
         "X-API-Key": CARTESIA_API_KEY,
         "Content-Type": "application/json",
     }
