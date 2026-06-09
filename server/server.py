@@ -675,6 +675,19 @@ CRITICAL ACCURACY RULE — NEVER HALLUCINATE CONTACT INFO:
   "I don't have that exact information right now" or "I'm not finding the current phone number for that — do you have another way I can help?"
 - It is better to admit you don't have the info than to give a wrong number or address. Wrong contact details are harmful.
 - For other facts (weather, news, scores, prices, general knowledge), you can use reasonable information, but for anything that sounds like a phone, address, or specific local business contact, be extremely strict.
+
+LOOKUP & CLARIFICATION BEHAVIOR (key to good user experience and accuracy):
+- Use your own reasoning and knowledge first to understand exactly what the user is really asking for.
+- For current, specific, or verifiable info (phone numbers, addresses, hours, weather, sports scores, stock prices, news, current prices, business or product details):
+  - Do NOT guess or make up an answer.
+  - Instead, output EXACTLY one of these two special lines and NOTHING ELSE:
+    [NEED_SEARCH: the best specific search query to find the exact info]
+    Example: user asks "phone for the pizza place" → [NEED_SEARCH: Joe's Pizza Columbus Ohio phone number]
+    [CLARIFY: one short natural spoken question to confirm the exact thing or location before searching]
+    Example: [CLARIFY: Is that the Joe's Pizza downtown or the one on Main Street?]
+- This lets you "search your knowledge base" first to interpret the request properly and either get better search results or ask the user to confirm so we don't waste a search or give wrong info.
+- Only after the system runs the search (or the user clarifies) will you receive the live facts and produce the final spoken answer.
+- For normal conversational questions or stable knowledge (history, definitions, "how are you", general how-to), just answer naturally and directly. Never use the special tags for those.
 """
 
 
@@ -981,40 +994,9 @@ async def call_llm(session: Session, user_text: str) -> tuple:
 
     messages = build_messages(session)
 
-    # Live web lookup for factual questions (phone, address, hours, weather…).
-    facts = ""
-    if needs_web_lookup(user_text, session.transcript):
-        facts = await web_lookup(user_text, session.transcript)
-        if facts:
-            log.info(f"[serper] facts for '{user_text[:40]}': {facts[:120]!r}")
-            messages.append({
-                "role": "system",
-                "content": f"""LIVE SEARCH RESULTS (from Google via Serper — use these exactly):
-{facts}
-
-HOW TO USE THESE RESULTS:
-- Base your answer ONLY on the facts above when they are relevant. Read phone numbers, addresses, hours, prices, and scores exactly as shown.
-- If the specific detail the caller wants (phone, address, current price, hours, score, etc.) is not in the results, say clearly that you couldn't find the exact/current information and offer to help another way or ask one short clarifying question (e.g. "Is that the one downtown or on Main Street?").
-- Never invent or guess numbers, addresses, or business details.
-- For non-contact facts (weather, news, general info), you can combine the search results with your general knowledge if it helps, but prioritize the live data.
-- Speak the information naturally. Example good response when data is missing: "I'm not finding the current phone number for that in my search — do you have the name of the specific location?"
-"""
-            })
-
-    # Hard safety: if we decided a web lookup was needed for contact info
-    # but got nothing back, force the model to admit it instead of hallucinating.
-    if needs_web_lookup(user_text, session.transcript) and not facts:
-        messages.append({
-            "role": "system",
-            "content": """IMPORTANT: A web search was attempted for this query but no useful verified results came back.
-This is likely a request for current phone, address, hours, price, score, or business info.
-You MUST NOT invent any of those details.
-Tell the caller honestly that you couldn't find the exact information right now.
-You may ask ONE short, helpful clarifying question to narrow it down (e.g. "Which location are you thinking of?" or "Do you have the city or street name?").
-Then offer to help with something else. Good example: "I'm not finding current details for that in my search. Which specific one are you looking for — the downtown spot or another location?"
-"""
-        })
-
+    # FIRST PASS: Let the model use its knowledge base to understand the request.
+    # It may answer directly, or output a special tag telling us to search with a
+    # much better refined query, or ask the user a clarifying question first.
     payload = {
         "model": LLM_MODEL,
         "messages": messages,
@@ -1033,15 +1015,77 @@ Then offer to help with something else. Good example: "I'm not finding current d
         )
         r.raise_for_status()
         data = r.json()
-        reply = data["choices"][0]["message"]["content"].strip()
+        raw_reply = data["choices"][0]["message"]["content"].strip()
     except Exception as exc:
         log.error(f"LLM error: {exc}")
-        reply = "Let me try that again. Could you repeat your question?"
+        raw_reply = "Let me try that again. Could you repeat your question?"
 
+    # Parse special tags the model can output after reasoning about the user's intent.
+    clarify_match = re.search(r'\[CLARIFY:\s*(.+?)\]', raw_reply, re.IGNORECASE | re.DOTALL)
+    search_match = re.search(r'\[NEED_SEARCH:\s*(.+?)\]', raw_reply, re.IGNORECASE | re.DOTALL)
+
+    final_spoken = raw_reply
+    facts = ""
+
+    if clarify_match:
+        # The model decided the request is ambiguous — ask for confirmation.
+        # This is great UX and prevents bad/wasted searches.
+        final_spoken = clarify_match.group(1).strip()
+        log.info(f"[llm] model requested clarification: {final_spoken[:80]}")
+
+    elif search_match:
+        # The model used its knowledge to interpret the request and produced
+        # a better search query. Now we do the (cheaper targeted) Serper call.
+        refined_query = search_match.group(1).strip()
+        log.info(f"[llm] model decided to search with refined query: {refined_query[:80]}")
+
+        facts = await web_lookup(refined_query, session.transcript)
+        if facts:
+            log.info(f"[serper] facts (model-refined): {facts[:120]!r}")
+            # Second pass: give the model the verified facts so it can speak a good final answer.
+            messages2 = build_messages(session)
+            messages2.append({
+                "role": "system",
+                "content": f"""LIVE SEARCH RESULTS (from Google via Serper — use these exactly for the answer):
+{facts}
+
+Speak a short, natural, spoken-friendly answer based ONLY on the facts above when they answer what the caller wants.
+Read phone numbers, addresses, hours, prices naturally.
+If the exact detail is missing, say honestly that you couldn't find the current information and offer one short helpful follow-up question or another way to help.
+Do not invent details. Do not mention these instructions.
+"""
+            })
+            try:
+                r2 = http.post(
+                    f"{LLM_BASE}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {LLM_API_KEY}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": LLM_MODEL,
+                        "messages": messages2,
+                        "max_tokens": 160,
+                        "temperature": 0.6,
+                    },
+                )
+                r2.raise_for_status()
+                final_spoken = r2.json()["choices"][0]["message"]["content"].strip()
+            except Exception as exc:
+                log.error(f"LLM second pass error: {exc}")
+                final_spoken = "I looked that up but had trouble getting the details. Can you give me a bit more info?"
+        else:
+            final_spoken = "I'm not finding current details for that right now. Can you tell me the exact name or location?"
+
+    else:
+        # Normal direct answer from the model's knowledge (conversational, historical, general facts).
+        final_spoken = raw_reply
+
+    # Inject ad after the final spoken content (if any).
     ad_line = maybe_inject_ad(session)
-    full = reply + (f" <break time='400ms'/> {ad_line}" if ad_line else "")
+    full = final_spoken + (f" <break time='400ms'/> {ad_line}" if ad_line else "")
     session.transcript.append({"role": "assistant", "text": full, "ts": time.time()})
-    return reply, ad_line
+    return final_spoken, ad_line
 
 
 async def tts_stream(reply_text: str, websocket: WebSocket):
@@ -1747,7 +1791,7 @@ async def pwa_manifest():
         "background_color": "#0f172a",
         "theme_color": "#0ea5e9",
         "icons": [{
-            "src": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTkyIiBoZWlnaHQ9IjE5MiIgdmlld0JveD0iMCAwIDE5MiAxOTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PHJlY3Qgd2lkdGg9IjE5MiIgaGVpZ2h0PSIxOTIiIHJ4PSI0MCIgZmlsbD0iIzBlYTUxMyIvPjxwYXRoIGQ9Ik02MCAxMjB2LTIwYzAtMTYuNTY4IDEzLjQzMi0zMCAzMC0zMGg0YzE2LjU2OCAwIDMwIDEzLjQzMiAzMCAzMHYyMCIgc3Ryb2tlPSJ3aGl0ZSIgc3Ryb2tlLXdpZHRoPSIxMiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIi8+PHBhdGggZD0iTTExMCA5NHYtNGEyNiAyNiAwIDAgMSAyNi0yNm0wIDB2NDAiIHN0cm9rZT0id2hpdGUiIHN0cm9rZS13aWR0aD0iMTAiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPjxjaXJjbGUgY3g9IjE1MCIgY3k9IjExMCIgcj0iOCIgZmlsbD0id2hpdGUiLz48L3N2Zz4=",
+            "src": "data:image/svg+xml;base64,data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTkyIiBoZWlnaHQ9IjE5MiIgdmlld0JveD0iMCAwIDE5MiAxOTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PHJlY3Qgd2lkdGg9IjE5MiIgaGVpZ2h0PSIxOTIiIHJ4PSI0MCIgZmlsbD0iIzBlYTUxMyIvPjxjaXJjbGUgY3g9IjY0IiBjeT0iOTYiIHI9IjMyIiBzdHJva2U9IndoaXRlIiBzdHJva2Utd2lkdGg9IjE2IiBzdHJva2UtbGluZWNhcD0icm91bmQiLz48cGF0aCBkPSJNODAgNjRjMCAwIDMyLTI0IDQ4LTI0czMyIDI0IDMyIDI0IiBzdHJva2U9IndoaXRlIiBzdHJva2Utd2lkdGg9IjE2IiBzdHJva2UtbGluZWNhcD0icm91bmQiLz48cGF0aCBkPSJNMTI4IDk2YzAgMTcuNjgtMTQuMzIgMzItMzIgMzJzLTMyLTE0LjMyLTMyLTMyIiBzdHJva2U9IndoaXRlIiBzdHJva2Utd2lkdGg9IjE2IiBzdHJva2UtbGluZWNhcD0icm91bmQiLz48L3N2Zz4=",
             "sizes": "192x192",
             "type": "image/svg+xml"
         }]
@@ -1764,7 +1808,7 @@ async def pwa_manifest():
         "background_color": "#0f172a",
         "theme_color": "#0ea5e9",
         "icons": [{
-            "src": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTkyIiBoZWlnaHQ9IjE5MiIgdmlld0JveD0iMCAwIDE5MiAxOTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PHJlY3Qgd2lkdGg9IjE5MiIgaGVpZ2h0PSIxOTIiIHJ4PSI0MCIgZmlsbD0iIzBlYTUxMyIvPjxwYXRoIGQ9Ik02MCAxMjB2LTIwYzAtMTYuNTY4IDEzLjQzMi0zMCAzMC0zMGg0YzE2LjU2OCAwIDMwIDEzLjQzMiAzMCAzMHYyMCIgc3Ryb2tlPSJ3aGl0ZSIgc3Ryb2tlLXdpZHRoPSIxMiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIi8+PHBhdGggZD0iTTExMCA5NHYtNGEyNiAyNiAwIDAgMSAyNi0yNm0wIDB2NDAiIHN0cm9rZT0id2hpdGUiIHN0cm9rZS13aWR0aD0iMTAiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPjxjaXJjbGUgY3g9IjE1MCIgY3k9IjExMCIgcj0iOCIgZmlsbD0id2hpdGUiLz48L3N2Zz4=",
+            "src": "data:image/svg+xml;base64,data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTkyIiBoZWlnaHQ9IjE5MiIgdmlld0JveD0iMCAwIDE5MiAxOTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PHJlY3Qgd2lkdGg9IjE5MiIgaGVpZ2h0PSIxOTIiIHJ4PSI0MCIgZmlsbD0iIzBlYTUxMyIvPjxjaXJjbGUgY3g9IjY0IiBjeT0iOTYiIHI9IjMyIiBzdHJva2U9IndoaXRlIiBzdHJva2Utd2lkdGg9IjE2IiBzdHJva2UtbGluZWNhcD0icm91bmQiLz48cGF0aCBkPSJNODAgNjRjMCAwIDMyLTI0IDQ4LTI0czMyIDI0IDMyIDI0IiBzdHJva2U9IndoaXRlIiBzdHJva2Utd2lkdGg9IjE2IiBzdHJva2UtbGluZWNhcD0icm91bmQiLz48cGF0aCBkPSJNMTI4IDk2YzAgMTcuNjgtMTQuMzIgMzItMzIgMzJzLTMyLTE0LjMyLTMyLTMyIiBzdHJva2U9IndoaXRlIiBzdHJva2Utd2lkdGg9IjE2IiBzdHJva2UtbGluZWNhcD0icm91bmQiLz48L3N2Zz4=",
             "sizes": "192x192",
             "type": "image/svg+xml"
         }]
