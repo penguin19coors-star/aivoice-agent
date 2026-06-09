@@ -393,17 +393,24 @@ def classify_industry(transcript: List[Dict]) -> Dict[str, float]:
 
 
 def select_ad(session: Session) -> Optional[Dict[str, Any]]:
+    """Select the best ad for this moment.
+    - Global 90-second cooldown between any ads (per call).
+    - Respects each ad's daily_cap.
+    - No longer blocks the same ad ID per caller/session.
+      This allows the same sponsor's ad (and different variants) to play
+      multiple times for the same caller during longer conversations.
+    """
     now = time.time()
     if now - session.last_ad_at < 90:
         return None
-    already_played = set(session.ads_played)
+    # NOTE: We intentionally no longer skip ads that were already played
+    # in this session. The same ad + its keyword variants can now repeat
+    # for the same caller (subject to cooldown and daily_cap).
     context = session.topic_extract or classify_industry(session.transcript)
 
     candidates = []
     for ad in AD_DB:
         if not ad["active"]:
-            continue
-        if ad["id"] in already_played:
             continue
         if play_counts[ad["id"]] >= ad["daily_cap"]:
             continue
