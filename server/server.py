@@ -408,6 +408,8 @@ def select_ad(session: Session) -> Optional[Dict[str, Any]]:
     min_int = FREQUENCY.get("min_interval_seconds", 90)
     max_ads = FREQUENCY.get("max_ads", 2)
     window = FREQUENCY.get("window_seconds", 600)
+    force_after = FREQUENCY.get("force_min_ads_after_seconds", 300)
+    min_target = FREQUENCY.get("min_ads_target", 1)
 
     # 1. Enforce minimum spacing between ads in this call
     if session.last_ad_at > 0 and (now - session.last_ad_at) < min_int:
@@ -419,6 +421,14 @@ def select_ad(session: Session) -> Optional[Dict[str, Any]]:
         recent_ads = [t for t in session.ad_play_times if t >= window_start]
         if len(recent_ads) >= max_ads:
             return None
+
+    # 3. Force minimum ads after X minutes of call time
+    # If the call has been going long enough and we haven't hit the minimum yet,
+    # we relax the relevance threshold so an ad is more likely to be selected.
+    call_age = now - getattr(session, 'created_at', now)
+    force_min_mode = False
+    if call_age > force_after and len(session.ad_play_times) < min_target:
+        force_min_mode = True
 
     context = session.topic_extract or classify_industry(session.transcript)
 
@@ -441,13 +451,17 @@ def select_ad(session: Session) -> Optional[Dict[str, Any]]:
         return None
     candidates.sort(key=lambda x: x["score"], reverse=True)
     best = candidates[0]
-    if best["relevance"] < 0.35:
-        return None
+    min_relevance = 0.1 if force_min_mode else 0.35
+    if best["relevance"] < min_relevance:
+        if force_min_mode:
+            log.info("[ad] forcing minimum ad due to call duration (relaxed relevance)")
+        else:
+            return None
 
     log.info(
         f"[ad] selected {best['ad']['id']} sponsor={best['ad']['sponsor']} "
         f"score={best['score']:.2f} relevance={best['relevance']:.2f} "
-        f"(window_ads={len([t for t in session.ad_play_times if t >= now - window])})"
+        f"(window_ads={len([t for t in session.ad_play_times if t >= now - window])} force_min={force_min_mode})"
     )
     return best["ad"]
 
@@ -699,6 +713,9 @@ FREQUENCY = {
     "min_interval_seconds": int(os.environ.get("AD_MIN_INTERVAL_SECONDS", "90")),
     "max_ads": int(os.environ.get("AD_MAX_ADS", "2")),
     "window_seconds": int(os.environ.get("AD_WINDOW_SECONDS", "600")),
+    # Minimum ads enforcement
+    "force_min_ads_after_seconds": int(os.environ.get("AD_FORCE_MIN_AFTER_SECONDS", "300")),  # 5 minutes
+    "min_ads_target": int(os.environ.get("AD_MIN_ADS_TARGET", "1")),
 }
 CARTESIA_MODEL = os.environ.get("CARTESIA_MODEL", "sonic-2")
 _resolved_voice: Optional[str] = None
@@ -1689,7 +1706,7 @@ async def get_settings(x_admin_token: Optional[str] = Header(default=None)):
 @app.put("/admin/settings")
 async def update_settings(payload: dict, x_admin_token: Optional[str] = Header(default=None)):
     check_admin(x_admin_token)
-    allowed = {"min_interval_seconds", "max_ads", "window_seconds"}
+    allowed = {"min_interval_seconds", "max_ads", "window_seconds", "force_min_ads_after_seconds", "min_ads_target"}
     updated = {}
     for k, v in payload.items():
         if k in allowed:
@@ -1751,13 +1768,22 @@ ADMIN_HTML = """<!doctype html>
   <link rel="manifest" href="/manifest.json">
   <script src="https://cdn.tailwindcss.com"></script>
   <style>
-    body { font-family: system-ui, -apple-system, sans-serif; }
+    :root { color-scheme: dark; }
+    body.light { background: #f8fafc; color: #0f172a; }
+    body.light .bg-slate-950 { background: #f8fafc !important; }
+    body.light .bg-slate-900 { background: #f1f5f9 !important; }
+    body.light .bg-slate-800 { background: #e2e8f0 !important; }
+    body.light .text-slate-200 { color: #0f172a !important; }
+    body.light .text-slate-400 { color: #64748b !important; }
+    body.light .border-slate-800 { border-color: #cbd5e1 !important; }
     .nav-item { transition: all 0.1s; }
     .nav-item.active { background-color: #1e2937; border-left: 3px solid #0ea5e9; }
+    body.light .nav-item.active { background-color: #e2e8f0; border-left-color: #0ea5e9; }
     .section { display: none; }
     .section.active { display: block; }
+    .modal { max-width: 80vw; width: 100%; }
     @media (max-width: 768px) {
-      .sidebar { width: 100%; position: fixed; top: 0; left: 0; z-index: 50; transform: translateX(-100%); }
+      .sidebar { width: 100%; position: fixed; top: 0; left: 0; z-index: 50; transform: translateX(-100%); transition: transform 0.2s; }
       .sidebar.open { transform: translateX(0); }
       .main-content { margin-left: 0; }
     }
@@ -1765,14 +1791,17 @@ ADMIN_HTML = """<!doctype html>
 </head>
 <body class="bg-slate-950 text-slate-200">
   <div class="flex h-screen overflow-hidden">
-    <!-- Sidebar / Mobile Nav -->
+    <!-- Sidebar -->
     <div id="sidebar" class="sidebar w-64 bg-slate-900 border-r border-slate-800 flex flex-col">
-      <div class="p-4 border-b border-slate-800 flex items-center gap-3">
-        <div class="w-9 h-9 bg-sky-500 rounded-xl flex items-center justify-center text-xl">📞</div>
-        <div>
-          <div class="font-semibold text-lg">Voice Agent</div>
-          <div class="text-xs text-slate-400">Admin Console</div>
+      <div class="p-4 border-b border-slate-800 flex items-center justify-between">
+        <div class="flex items-center gap-3">
+          <div class="w-9 h-9 bg-sky-500 rounded-xl flex items-center justify-center text-xl">📞</div>
+          <div>
+            <div class="font-semibold text-lg">Voice Agent</div>
+            <div class="text-xs text-slate-400">Admin</div>
+          </div>
         </div>
+        <button onclick="toggleTheme()" class="text-xl" title="Toggle theme">🌓</button>
       </div>
 
       <div class="p-2 flex-1">
@@ -1796,15 +1825,14 @@ ADMIN_HTML = """<!doctype html>
       </div>
     </div>
 
-    <!-- Main Content -->
+    <!-- Main -->
     <div class="flex-1 flex flex-col main-content overflow-auto">
-      <!-- Top Bar -->
       <div class="h-14 border-b border-slate-800 px-4 flex items-center justify-between bg-slate-900/70">
         <div class="flex items-center gap-3">
           <button onclick="toggleMobileSidebar()" class="md:hidden text-xl">☰</button>
           <div id="section-title" class="font-semibold text-lg">Overview</div>
         </div>
-        <div class="text-xs text-slate-400">Live on Render • <span id="last-updated"></span></div>
+        <div class="text-xs text-slate-400">Live • <span id="last-updated"></span></div>
       </div>
 
       <!-- Overview -->
@@ -1824,7 +1852,7 @@ ADMIN_HTML = """<!doctype html>
             <div id="active-ads" class="text-3xl font-semibold mt-1">0</div>
           </div>
         </div>
-        <div class="mt-8 text-sm text-slate-400">Frequency is currently controlled via the Frequency tab. Changes apply immediately to new calls.</div>
+        <div class="mt-8 text-sm text-slate-400">Minimum ads are forced after the configured call duration if none have played yet.</div>
       </div>
 
       <!-- Manage Ads -->
@@ -1836,32 +1864,42 @@ ADMIN_HTML = """<!doctype html>
         <div id="ads-list" class="space-y-3"></div>
       </div>
 
-      <!-- Frequency Controls -->
+      <!-- Frequency -->
       <div id="frequency" class="section p-6">
-        <h2 class="text-xl font-semibold mb-2">Ad Frequency Controls</h2>
-        <p class="text-slate-400 mb-6 text-sm">Control how many ads are played relative to actual phone time per call.</p>
+        <h2 class="text-xl font-semibold mb-2">Ad Frequency & Minimums</h2>
+        <p class="text-slate-400 mb-6 text-sm">Control ad density and guarantee minimum plays after certain call lengths.</p>
 
-        <div class="max-w-md bg-slate-900 rounded-2xl p-6 space-y-5">
-          <div>
-            <label class="block text-sm text-slate-400 mb-1">Minimum seconds between ads (per call)</label>
-            <input id="min-interval" type="number" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2 text-lg">
+        <div class="max-w-xl bg-slate-900 rounded-2xl p-6 space-y-6">
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div>
+              <label class="block text-sm text-slate-400 mb-1">Min seconds between ads</label>
+              <input id="min-interval" type="number" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2 text-lg">
+            </div>
+            <div>
+              <label class="block text-sm text-slate-400 mb-1">Max ads in window</label>
+              <input id="max-ads" type="number" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2 text-lg">
+            </div>
+            <div>
+              <label class="block text-sm text-slate-400 mb-1">Window length (seconds)</label>
+              <input id="window-seconds" type="number" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2 text-lg">
+              <div class="text-xs text-slate-500 mt-1">e.g. 600 = last 10 min of call</div>
+            </div>
+            <div>
+              <label class="block text-sm text-slate-400 mb-1">Force min ads after (seconds)</label>
+              <input id="force-after" type="number" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2 text-lg">
+              <div class="text-xs text-slate-500 mt-1">After this call duration, ensure at least N ads</div>
+            </div>
+            <div>
+              <label class="block text-sm text-slate-400 mb-1">Minimum ads target</label>
+              <input id="min-target" type="number" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2 text-lg">
+            </div>
           </div>
-          <div>
-            <label class="block text-sm text-slate-400 mb-1">Max ads allowed in window</label>
-            <input id="max-ads" type="number" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2 text-lg">
-          </div>
-          <div>
-            <label class="block text-sm text-slate-400 mb-1">Window length (seconds)</label>
-            <input id="window-seconds" type="number" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2 text-lg">
-            <div class="text-xs text-slate-500 mt-1">e.g. 600 = last 10 minutes of the call</div>
-          </div>
-
-          <button onclick="saveFrequency()" class="w-full mt-2 py-3 bg-emerald-600 hover:bg-emerald-500 rounded-2xl font-medium">Save Frequency Settings</button>
+          <button onclick="saveFrequency()" class="w-full py-3 bg-emerald-600 hover:bg-emerald-500 rounded-2xl font-medium">Save Frequency Settings</button>
           <div id="freq-status" class="text-center text-sm text-emerald-400 h-5"></div>
         </div>
       </div>
 
-      <!-- Recent Plays -->
+      <!-- Logs -->
       <div id="logs" class="section p-6">
         <h2 class="text-xl font-semibold mb-4">Recent Ad Plays</h2>
         <div id="logs-list" class="space-y-2 text-sm font-mono"></div>
@@ -1869,9 +1907,9 @@ ADMIN_HTML = """<!doctype html>
     </div>
   </div>
 
-  <!-- Create/Edit Modal -->
+  <!-- Improved larger modal (80% width) -->
   <div id="modal" onclick="if (event.target.id === 'modal') hideModal()" class="hidden fixed inset-0 bg-black/70 flex items-center justify-center z-[100]">
-    <div onclick="event.stopImmediatePropagation()" class="bg-slate-900 w-full max-w-lg mx-4 rounded-3xl p-6">
+    <div onclick="event.stopImmediatePropagation()" class="modal bg-slate-900 rounded-3xl p-8 max-w-[80vw] md:max-w-3xl w-full mx-4">
       <div id="modal-content"></div>
     </div>
   </div>
@@ -1886,13 +1924,31 @@ function setToken(t) {
   document.getElementById('token-status').textContent = 'connected';
 }
 
+function toggleTheme() {
+  const body = document.body;
+  if (body.classList.contains('light')) {
+    body.classList.remove('light');
+    localStorage.setItem('theme', 'dark');
+  } else {
+    body.classList.add('light');
+    localStorage.setItem('theme', 'light');
+  }
+}
+
+function applySavedTheme() {
+  const saved = localStorage.getItem('theme');
+  if (saved === 'light') {
+    document.body.classList.add('light');
+  }
+}
+
 async function api(path, method = 'GET', body = null) {
   const headers = { 'X-Admin-Token': ADMIN_TOKEN };
   if (body) headers['Content-Type'] = 'application/json';
   const res = await fetch(path, { method, headers, body: body ? JSON.stringify(body) : undefined });
   if (!res.ok) {
     if (res.status === 401) {
-      const tok = prompt('Enter Admin Token (X-Admin-Token):');
+      const tok = prompt('Enter Admin Token:');
       if (tok) { setToken(tok); return api(path, method, body); }
     }
     throw new Error(await res.text());
@@ -1909,6 +1965,12 @@ function showSection(name) {
   if (nav) nav.classList.add('active');
 
   document.getElementById('section-title').textContent = name.charAt(0).toUpperCase() + name.slice(1);
+
+  // Close sidebar on mobile after selection
+  const sb = document.getElementById('sidebar');
+  if (window.innerWidth < 768) {
+    sb.classList.remove('open');
+  }
 
   if (name === 'ads') loadAds();
   if (name === 'overview') loadOverview();
@@ -1936,7 +1998,7 @@ async function loadAds() {
       <div class="flex-1">
         <div class="font-medium">${ad.sponsor} <span class="text-xs px-2 py-0.5 rounded bg-slate-800">${ad.id}</span></div>
         <div class="text-xs text-slate-400 mt-0.5">${(ad.keywords || []).join(', ')}</div>
-        <div class="text-xs mt-1 text-slate-500">Plays: ${stats.play_counts?.[ad.id] || 0} • $${((stats.play_counts?.[ad.id] || 0) * (ad.bid_cpm / 1000)).toFixed(2)}</div>
+        <div class="text-xs mt-1 text-slate-500">Plays: ${stats.play_counts?.[ad.id] || 0}</div>
       </div>
       <div class="flex flex-col gap-1 text-right text-xs">
         <button onclick="editAd('${ad.id}')" class="text-sky-400 hover:text-sky-300">Edit</button>
@@ -1955,6 +2017,8 @@ async function loadFrequency() {
     document.getElementById('min-interval').value = f.min_interval_seconds ?? 90;
     document.getElementById('max-ads').value = f.max_ads ?? 2;
     document.getElementById('window-seconds').value = f.window_seconds ?? 600;
+    document.getElementById('force-after').value = f.force_min_ads_after_seconds ?? 300;
+    document.getElementById('min-target').value = f.min_ads_target ?? 1;
   } catch(e) { console.error(e); }
 }
 
@@ -1962,11 +2026,13 @@ async function saveFrequency() {
   const payload = {
     min_interval_seconds: parseInt(document.getElementById('min-interval').value),
     max_ads: parseInt(document.getElementById('max-ads').value),
-    window_seconds: parseInt(document.getElementById('window-seconds').value)
+    window_seconds: parseInt(document.getElementById('window-seconds').value),
+    force_min_ads_after_seconds: parseInt(document.getElementById('force-after').value),
+    min_ads_target: parseInt(document.getElementById('min-target').value),
   };
   try {
     await api('/admin/settings', 'PUT', payload);
-    document.getElementById('freq-status').textContent = 'Saved ✓ Changes apply to new calls immediately';
+    document.getElementById('freq-status').textContent = 'Saved ✓ Applies to new calls';
     setTimeout(() => document.getElementById('freq-status').textContent = '', 2200);
   } catch(e) {
     alert('Failed to save: ' + e.message);
@@ -1991,15 +2057,42 @@ async function editAd(id) {
   if (!ad) return;
 
   const html = `
-    <h3 class="font-semibold mb-4">Edit Ad</h3>
-    <div class="space-y-3 text-sm">
-      <input id="m-sponsor" value="${ad.sponsor || ''}" class="w-full bg-slate-800 px-3 py-2 rounded-xl" placeholder="Sponsor">
-      <input id="m-script" value="${ad.script || ''}" class="w-full bg-slate-800 px-3 py-2 rounded-xl" placeholder="Script">
-      <div class="grid grid-cols-2 gap-3">
-        <input id="m-bid" type="number" value="${ad.bid_cpm || 0}" class="bg-slate-800 px-3 py-2 rounded-xl" placeholder="Bid CPM">
-        <input id="m-cap" type="number" value="${ad.daily_cap || 100}" class="bg-slate-800 px-3 py-2 rounded-xl" placeholder="Daily Cap">
+    <h3 class="font-semibold text-xl mb-6">Edit Sponsor Ad</h3>
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+      <div class="md:col-span-2">
+        <label class="text-xs text-slate-400">Sponsor Name</label>
+        <input id="m-sponsor" value="${ad.sponsor || ''}" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-lg">
       </div>
-      <button onclick="saveAdEdit('${id}')" class="w-full py-2.5 bg-emerald-600 rounded-2xl">Save Changes</button>
+      <div class="md:col-span-2">
+        <label class="text-xs text-slate-400">Ad Script (spoken to caller)</label>
+        <textarea id="m-script" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-base h-28">${ad.script || ''}</textarea>
+      </div>
+      <div>
+        <label class="text-xs text-slate-400">Bid CPM ($)</label>
+        <input id="m-bid" type="number" step="0.5" value="${ad.bid_cpm || 0}" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-lg">
+      </div>
+      <div>
+        <label class="text-xs text-slate-400">Daily Cap</label>
+        <input id="m-cap" type="number" value="${ad.daily_cap || 100}" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-lg">
+      </div>
+      <div>
+        <label class="text-xs text-slate-400">Industry</label>
+        <input id="m-industry" value="${ad.industry || 'general'}" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3">
+      </div>
+      <div>
+        <label class="text-xs text-slate-400">Weight</label>
+        <input id="m-weight" type="number" step="0.1" value="${ad.weight || 1}" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3">
+      </div>
+      <div class="md:col-span-2 flex items-center gap-3">
+        <label class="flex items-center gap-2">
+          <input type="checkbox" id="m-active" ${ad.active ? 'checked' : ''} class="w-4 h-4">
+          <span>Active</span>
+        </label>
+      </div>
+    </div>
+    <div class="mt-6 flex gap-3">
+      <button onclick="saveAdEdit('${id}')" class="flex-1 py-3 bg-emerald-600 hover:bg-emerald-500 rounded-2xl font-medium">Save Changes</button>
+      <button onclick="hideModal()" class="px-6 py-3 bg-slate-700 rounded-2xl">Cancel</button>
     </div>
   `;
   document.getElementById('modal-content').innerHTML = html;
@@ -2012,7 +2105,10 @@ async function saveAdEdit(id) {
     sponsor: document.getElementById('m-sponsor').value,
     script: document.getElementById('m-script').value,
     bid_cpm: parseFloat(document.getElementById('m-bid').value),
-    daily_cap: parseInt(document.getElementById('m-cap').value)
+    daily_cap: parseInt(document.getElementById('m-cap').value),
+    industry: document.getElementById('m-industry').value,
+    weight: parseFloat(document.getElementById('m-weight').value),
+    active: document.getElementById('m-active').checked
   };
   await api(`/admin/ads/${id}`, 'PUT', payload);
   hideModal();
@@ -2032,16 +2128,36 @@ async function deleteAd(id) {
 
 function showCreateAdModal() {
   const html = `
-    <h3 class="font-semibold mb-4">Create New Ad</h3>
-    <div class="space-y-3 text-sm">
-      <input id="c-sponsor" placeholder="Sponsor Name" class="w-full bg-slate-800 px-3 py-2 rounded-xl">
-      <input id="c-keywords" placeholder="Keywords (comma separated)" class="w-full bg-slate-800 px-3 py-2 rounded-xl">
-      <textarea id="c-script" placeholder="Ad script (what is spoken)" class="w-full bg-slate-800 px-3 py-2 rounded-xl h-20"></textarea>
-      <div class="grid grid-cols-2 gap-3">
-        <input id="c-bid" type="number" placeholder="Bid CPM" value="10" class="bg-slate-800 px-3 py-2 rounded-xl">
-        <input id="c-cap" type="number" placeholder="Daily Cap" value="100" class="bg-slate-800 px-3 py-2 rounded-xl">
+    <h3 class="font-semibold text-xl mb-6">Create New Sponsor Ad</h3>
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+      <div class="md:col-span-2">
+        <label class="text-xs text-slate-400">Sponsor Name</label>
+        <input id="c-sponsor" placeholder="Sponsor Name" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-lg">
       </div>
-      <button onclick="createAd()" class="w-full py-2.5 bg-sky-600 rounded-2xl">Create Ad</button>
+      <div class="md:col-span-2">
+        <label class="text-xs text-slate-400">Ad Script (what the AI will say)</label>
+        <textarea id="c-script" placeholder="By the way, Sponsor offers..." class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-base h-28"></textarea>
+      </div>
+      <div>
+        <label class="text-xs text-slate-400">Keywords (comma separated)</label>
+        <input id="c-keywords" placeholder="solar, energy, bill" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3">
+      </div>
+      <div>
+        <label class="text-xs text-slate-400">Industry</label>
+        <input id="c-industry" value="general" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3">
+      </div>
+      <div>
+        <label class="text-xs text-slate-400">Bid CPM ($)</label>
+        <input id="c-bid" type="number" step="0.5" value="10" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-lg">
+      </div>
+      <div>
+        <label class="text-xs text-slate-400">Daily Cap</label>
+        <input id="c-cap" type="number" value="100" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-lg">
+      </div>
+    </div>
+    <div class="mt-6 flex gap-3">
+      <button onclick="createAd()" class="flex-1 py-3 bg-sky-600 hover:bg-sky-500 rounded-2xl font-medium">Create Ad</button>
+      <button onclick="hideModal()" class="px-6 py-3 bg-slate-700 rounded-2xl">Cancel</button>
     </div>
   `;
   document.getElementById('modal-content').innerHTML = html;
@@ -2052,7 +2168,7 @@ function showCreateAdModal() {
 async function createAd() {
   const payload = {
     sponsor: document.getElementById('c-sponsor').value,
-    industry: 'general',
+    industry: document.getElementById('c-industry').value,
     keywords: document.getElementById('c-keywords').value.split(',').map(s => s.trim()).filter(Boolean),
     script: document.getElementById('c-script').value,
     bid_cpm: parseFloat(document.getElementById('c-bid').value) || 8,
@@ -2079,33 +2195,30 @@ async function installPWA() {
   if (window.deferredPrompt) {
     window.deferredPrompt.prompt();
   } else {
-    alert('To install: Use your browser menu → "Add to Home Screen" or "Install App"');
+    alert('Use your browser menu → "Add to Home Screen"');
   }
 }
 
 async function init() {
-  // PWA install prompt capture
+  applySavedTheme();
+
   window.addEventListener('beforeinstallprompt', (e) => {
     e.preventDefault();
     window.deferredPrompt = e;
   });
 
-  // Register service worker
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('/sw.js').catch(() => {});
   }
 
-  // Ask for token if missing
   if (!ADMIN_TOKEN) {
-    const tok = prompt('Enter your Admin Token (X-Admin-Token header):');
+    const tok = prompt('Enter your Admin Token (X-Admin-Token):');
     if (tok) setToken(tok);
   }
 
-  // Initial load
   await loadOverview();
   document.getElementById('last-updated').textContent = new Date().toLocaleTimeString();
 
-  // Auto refresh overview
   setInterval(() => {
     if (document.getElementById('overview').classList.contains('active')) loadOverview();
   }, 15000);
