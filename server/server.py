@@ -1879,7 +1879,7 @@ ADMIN_HTML = """<!doctype html>
         </div>
       </div>
       <div class="p-4 border-t border-slate-800 text-xs text-slate-400">
-        <div>Token: <span id="token-status" class="text-emerald-400">connected</span></div>
+        <div onclick="promptForToken()" class="cursor-pointer" title="Click to set/change admin token">Token: <span id="token-status" class="text-amber-400">not set</span></div>
         <button onclick="installPWA()" class="mt-3 text-sky-400 hover:text-sky-300 text-xs">Install as App</button>
       </div>
     </div>
@@ -1978,10 +1978,26 @@ try {
   let currentVariants = [];
 
   function setToken(t) {
-    ADMIN_TOKEN = t;
-    localStorage.setItem('admin_token', t);
+    ADMIN_TOKEN = (t || '').trim();
+    localStorage.setItem('admin_token', ADMIN_TOKEN);
+    updateTokenStatus(ADMIN_TOKEN ? 'checking…' : 'not set', ADMIN_TOKEN ? '#fbbf24' : '#f87171');
+  }
+
+  function updateTokenStatus(text, color) {
     const el = document.getElementById('token-status');
-    if (el) el.textContent = 'connected';
+    if (el) { el.textContent = text; el.style.color = color || ''; }
+  }
+
+  function promptForToken() {
+    const tok = prompt('Enter Admin Token (set as ADMIN_TOKEN in Render):');
+    if (tok) { setToken(tok); refreshCurrent(); }
+  }
+
+  function refreshCurrent() {
+    if (currentSection === 'ads') loadAds();
+    else if (currentSection === 'frequency') loadFrequency();
+    else if (currentSection === 'logs') loadLogs();
+    else loadOverview();
   }
 
   function toggleTheme() {
@@ -2006,15 +2022,18 @@ try {
     const res = await fetch(path, { method, headers, body: body ? JSON.stringify(body) : undefined });
     if (!res.ok) {
       if (res.status === 401) {
-        const tok = prompt('Enter Admin Token:');
+        updateTokenStatus('invalid — click to fix', '#f87171');
+        const tok = prompt('Admin token is missing or wrong. Enter your ADMIN_TOKEN (from Render):');
         if (tok) { setToken(tok); return api(path, method, body); }
       }
       throw new Error(await res.text());
     }
+    updateTokenStatus('connected', '#34d399');
     return res.json();
   }
 
   function showSection(name) {
+    currentSection = name;
     document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
     const sec = document.getElementById(name);
     if (sec) sec.classList.add('active');
@@ -2273,8 +2292,9 @@ try {
     applySavedTheme();
     window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); window.deferredPrompt = e; });
     if ('serviceWorker' in navigator) { navigator.serviceWorker.register('/sw.js').catch(()=>{}); }
+    updateTokenStatus(ADMIN_TOKEN ? 'checking…' : 'not set', ADMIN_TOKEN ? '#fbbf24' : '#f87171');
     if (!ADMIN_TOKEN) {
-      const tok = prompt('Enter Admin Token:');
+      const tok = prompt('Enter Admin Token (set as ADMIN_TOKEN in Render):');
       if (tok) setToken(tok);
     }
     await loadOverview();
@@ -2294,7 +2314,7 @@ try {
     showSection, toggleTheme, toggleMobileSidebar, installPWA,
     showCreateAdModal, createAd, editAd, saveAdEdit, toggleAd, deleteAd,
     hideModal, addVariant, removeVariant, updateVariant, saveFrequency,
-    setToken
+    setToken, promptForToken, updateTokenStatus, refreshCurrent
   });
 
   init();
