@@ -1747,16 +1747,29 @@ async def pwa_manifest():
         "background_color": "#0f172a",
         "theme_color": "#0ea5e9",
         "icons": [{
-            "src": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTkyIiBoZWlnaHQ9IjE5MiIgdmlld0JveD0iMCAwIDE5MiAxOTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PHJlY3Qgd2lkdGg9IjE5MiIgaGVpZ2h0PSIxOTIiIHJ4PSI0MCIgZmlsbD0iIzBlYTUxMyIvPjx0ZXh0IHg9Ijk2IiB5PSIxMjAiIGZvbnQtc2l6ZT0iODAiIGZpbGw9IndoaXRlIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj7wn5SZPC90ZXh0Pjwvc3ZnPg==",
+            "src": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTkyIiBoZWlnaHQ9IjE5MiIgdmlld0JveD0iMCAwIDE5MiAxOTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PHJlY3Qgd2lkdGg9IjE5MiIgaGVpZ2h0PSIxOTIiIHJ4PSI0MCIgZmlsbD0iIzBlYTUxMyIvPjxwYXRoIGQ9Ik02MCAxMjB2LTIwYzAtMTYuNTY4IDEzLjQzMi0zMCAzMC0zMGg0YzE2LjU2OCAwIDMwIDEzLjQzMiAzMCAzMHYyMCIgc3Ryb2tlPSJ3aGl0ZSIgc3Ryb2tlLXdpZHRoPSIxMiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIi8+PHBhdGggZD0iTTExMCA5NHYtNGEyNiAyNiAwIDAgMSAyNi0yNm0wIDB2NDAiIHN0cm9rZT0id2hpdGUiIHN0cm9rZS13aWR0aD0iMTAiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPjxjaXJjbGUgY3g9IjE1MCIgY3k9IjExMCIgcj0iOCIgZmlsbD0id2hpdGUiLz48L3N2Zz4=",
             "sizes": "192x192",
             "type": "image/svg+xml"
         }]
     }
 
-@app.get("/sw.js")
-async def pwa_sw():
-    js = 'self.addEventListener("install", e => self.skipWaiting()); self.addEventListener("fetch", e => {});'
-    return PlainTextResponse(js, media_type="application/javascript")
+
+@app.get("/manifest.json")
+async def pwa_manifest():
+    return {
+        "name": "AI Voice Agent Admin",
+        "short_name": "VoiceAdmin",
+        "start_url": "/admin",
+        "display": "standalone",
+        "background_color": "#0f172a",
+        "theme_color": "#0ea5e9",
+        "icons": [{
+            "src": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTkyIiBoZWlnaHQ9IjE5MiIgdmlld0JveD0iMCAwIDE5MiAxOTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PHJlY3Qgd2lkdGg9IjE5MiIgaGVpZ2h0PSIxOTIiIHJ4PSI0MCIgZmlsbD0iIzBlYTUxMyIvPjxwYXRoIGQ9Ik02MCAxMjB2LTIwYzAtMTYuNTY4IDEzLjQzMi0zMCAzMC0zMGg0YzE2LjU2OCAwIDMwIDEzLjQzMiAzMCAzMHYyMCIgc3Ryb2tlPSJ3aGl0ZSIgc3Ryb2tlLXdpZHRoPSIxMiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIi8+PHBhdGggZD0iTTExMCA5NHYtNGEyNiAyNiAwIDAgMSAyNi0yNm0wIDB2NDAiIHN0cm9rZT0id2hpdGUiIHN0cm9rZS13aWR0aD0iMTAiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPjxjaXJjbGUgY3g9IjE1MCIgY3k9IjExMCIgcj0iOCIgZmlsbD0id2hpdGUiLz48L3N2Zz4=",
+            "sizes": "192x192",
+            "type": "image/svg+xml"
+        }]
+    }
+
 
 ADMIN_HTML = """<!doctype html>
 <html lang="en">
@@ -1781,48 +1794,21 @@ ADMIN_HTML = """<!doctype html>
     body.light .nav-item.active { background-color: #e2e8f0; border-left-color: #0ea5e9; }
     .section { display: none; }
     .section.active { display: block; }
-    .modal { 
-      width: 80vw; 
-      height: 80vh; 
-      max-width: 80vw; 
-      max-height: 80vh;
-      overflow: hidden;
-    }
-    .modal-content { 
-      max-height: calc(80vh - 4rem); 
-      overflow-y: auto; 
-    }
+    .modal { width: 80vw; height: 80vh; max-width: 80vw; max-height: 80vh; overflow: hidden; }
+    .modal-content { max-height: calc(80vh - 4rem); overflow-y: auto; }
     @media (max-width: 768px) {
-      .modal { 
-        width: 92vw; 
-        height: 85vh; 
-        max-width: 92vw; 
-        max-height: 85vh;
-      }
+      .modal { width: 92vw; height: 85vh; max-width: 92vw; max-height: 85vh; }
       .modal-content { max-height: calc(85vh - 3.5rem); }
-      .sidebar { 
-        width: 100%; 
-        position: fixed; 
-        top: 0; 
-        left: 0; 
-        z-index: 50; 
-        transform: translateX(-100%); 
-        transition: transform 0.2s ease;
-      }
+      .sidebar { width: 100%; position: fixed; top: 0; left: 0; z-index: 50; transform: translateX(-100%); transition: transform 0.2s; }
       .sidebar.open { transform: translateX(0); }
       .main-content { margin-left: 0; }
-      .nav-item span:last-child { display: none; } /* collapse text on mobile, keep icons */
+      .nav-item span:last-child { display: none; }
     }
-    .small-btn {
-      font-size: 10px;
-      padding: 1px 6px;
-      line-height: 1.2;
-    }
+    .small-btn { font-size: 10px; padding: 1px 6px; line-height: 1.2; }
   </style>
 </head>
 <body class="bg-slate-950 text-slate-200">
   <div class="flex h-screen overflow-hidden">
-    <!-- Sidebar -->
     <div id="sidebar" class="sidebar w-64 bg-slate-900 border-r border-slate-800 flex flex-col">
       <div class="p-4 border-b border-slate-800 flex items-center justify-between">
         <div class="flex items-center gap-3">
@@ -1834,7 +1820,6 @@ ADMIN_HTML = """<!doctype html>
         </div>
         <button onclick="toggleTheme()" class="text-xl" title="Toggle theme">🌓</button>
       </div>
-
       <div class="p-2 flex-1">
         <div onclick="showSection('overview')" class="nav-item active flex items-center gap-3 px-3 py-2.5 rounded-xl cursor-pointer mb-1" data-nav="overview">
           <span>📊</span> <span>Overview</span>
@@ -1849,14 +1834,12 @@ ADMIN_HTML = """<!doctype html>
           <span>📋</span> <span>Recent Plays</span>
         </div>
       </div>
-
       <div class="p-4 border-t border-slate-800 text-xs text-slate-400">
         <div>Token: <span id="token-status" class="text-emerald-400">connected</span></div>
         <button onclick="installPWA()" class="mt-3 text-sky-400 hover:text-sky-300 text-xs">Install as App</button>
       </div>
     </div>
 
-    <!-- Main -->
     <div class="flex-1 flex flex-col main-content overflow-auto">
       <div class="h-14 border-b border-slate-800 px-4 flex items-center justify-between bg-slate-900/70">
         <div class="flex items-center gap-3">
@@ -1930,7 +1913,6 @@ ADMIN_HTML = """<!doctype html>
     </div>
   </div>
 
-  <!-- Large scrollable modal: 80% w/h, smaller on mobile -->
   <div id="modal" onclick="if (event.target.id === 'modal') hideModal()" class="hidden fixed inset-0 bg-black/70 flex items-center justify-center z-[100]">
     <div onclick="event.stopImmediatePropagation()" class="modal bg-slate-900 rounded-3xl p-6 flex flex-col">
       <div id="modal-content" class="modal-content flex-1 overflow-y-auto"></div>
@@ -1938,346 +1920,323 @@ ADMIN_HTML = """<!doctype html>
   </div>
 
 <script>
-let ADMIN_TOKEN = localStorage.getItem('admin_token') || '';
-let currentSection = 'overview';
+try {
+  let ADMIN_TOKEN = localStorage.getItem('admin_token') || '';
+  let currentSection = 'overview';
+  let currentVariants = [];
 
-function setToken(t) {
-  ADMIN_TOKEN = t;
-  localStorage.setItem('admin_token', t);
-  document.getElementById('token-status').textContent = 'connected';
-}
-
-function toggleTheme() {
-  const body = document.body;
-  if (body.classList.contains('light')) {
-    body.classList.remove('light');
-    localStorage.setItem('theme', 'dark');
-  } else {
-    body.classList.add('light');
-    localStorage.setItem('theme', 'light');
+  function setToken(t) {
+    ADMIN_TOKEN = t;
+    localStorage.setItem('admin_token', t);
+    const el = document.getElementById('token-status');
+    if (el) el.textContent = 'connected';
   }
-}
 
-function applySavedTheme() {
-  const saved = localStorage.getItem('theme');
-  if (saved === 'light') document.body.classList.add('light');
-}
-
-async function api(path, method = 'GET', body = null) {
-  const headers = { 'X-Admin-Token': ADMIN_TOKEN };
-  if (body) headers['Content-Type'] = 'application/json';
-  const res = await fetch(path, { method, headers, body: body ? JSON.stringify(body) : undefined });
-  if (!res.ok) {
-    if (res.status === 401) {
-      const tok = prompt('Enter Admin Token:');
-      if (tok) { setToken(tok); return api(path, method, body); }
+  function toggleTheme() {
+    const body = document.body;
+    if (body.classList.contains('light')) {
+      body.classList.remove('light');
+      localStorage.setItem('theme', 'dark');
+    } else {
+      body.classList.add('light');
+      localStorage.setItem('theme', 'light');
     }
-    throw new Error(await res.text());
   }
-  return res.json();
-}
 
-function showSection(name) {
-  document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
-  document.getElementById(name).classList.add('active');
+  function applySavedTheme() {
+    const saved = localStorage.getItem('theme');
+    if (saved === 'light') document.body.classList.add('light');
+  }
 
-  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
-  const nav = document.querySelector(`[data-nav="${name}"]`);
-  if (nav) nav.classList.add('active');
+  async function api(path, method = 'GET', body = null) {
+    const headers = { 'X-Admin-Token': ADMIN_TOKEN };
+    if (body) headers['Content-Type'] = 'application/json';
+    const res = await fetch(path, { method, headers, body: body ? JSON.stringify(body) : undefined });
+    if (!res.ok) {
+      if (res.status === 401) {
+        const tok = prompt('Enter Admin Token:');
+        if (tok) { setToken(tok); return api(path, method, body); }
+      }
+      throw new Error(await res.text());
+    }
+    return res.json();
+  }
 
-  document.getElementById('section-title').textContent = name.charAt(0).toUpperCase() + name.slice(1);
+  function showSection(name) {
+    document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+    const sec = document.getElementById(name);
+    if (sec) sec.classList.add('active');
 
-  // Auto-close sidebar on mobile when tab is selected
-  const sb = document.getElementById('sidebar');
-  if (window.innerWidth < 768 && sb) sb.classList.remove('open');
+    document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+    const nav = document.querySelector(`[data-nav="${name}"]`);
+    if (nav) nav.classList.add('active');
 
-  if (name === 'ads') loadAds();
-  if (name === 'overview') loadOverview();
-  if (name === 'frequency') loadFrequency();
-  if (name === 'logs') loadLogs();
-}
+    const title = document.getElementById('section-title');
+    if (title) title.textContent = name.charAt(0).toUpperCase() + name.slice(1);
 
-async function loadOverview() {
-  try {
-    const stats = await api('/admin/stats');
-    document.getElementById('total-revenue').textContent = '$' + (stats.total_revenue_usd || 0).toFixed(2);
-    document.getElementById('total-plays').textContent = stats.total_plays || 0;
-    document.getElementById('active-ads').textContent = (stats.ads || []).filter(a => a.active).length;
-  } catch(e) { console.error(e); }
-}
+    const sb = document.getElementById('sidebar');
+    if (window.innerWidth < 768 && sb) sb.classList.remove('open');
 
-async function loadAds() {
-  const stats = await api('/admin/stats');
-  const container = document.getElementById('ads-list');
-  container.innerHTML = '';
-  (stats.ads || []).forEach(ad => {
-    const div = document.createElement('div');
-    div.className = `bg-slate-900 rounded-2xl p-4 flex justify-between items-start ${ad.active ? '' : 'opacity-60'}`;
-    div.innerHTML = `
-      <div class="flex-1 min-w-0">
-        <div class="font-medium truncate">${ad.sponsor} <span class="text-xs px-2 py-0.5 rounded bg-slate-800">${ad.id}</span></div>
-        <div class="text-xs text-slate-400 mt-0.5 truncate">${(ad.keywords || []).join(', ')}</div>
-        <div class="text-xs mt-1 text-slate-500">Plays: ${stats.play_counts?.[ad.id] || 0} • Variants: ${(ad.variants || []).length}</div>
-      </div>
-      <div class="flex flex-col gap-1 text-right ml-2">
-        <button onclick="editAd('${ad.id}')" class="small-btn text-sky-400 hover:text-sky-300">Edit</button>
-        <button onclick="toggleAd('${ad.id}')" class="small-btn text-amber-400 hover:text-amber-300">${ad.active ? 'Pause' : 'Activate'}</button>
-        <button onclick="deleteAd('${ad.id}')" class="small-btn text-red-400 hover:text-red-300">Delete</button>
+    if (name === 'ads') loadAds();
+    if (name === 'overview') loadOverview();
+    if (name === 'frequency') loadFrequency();
+    if (name === 'logs') loadLogs();
+  }
+
+  async function loadOverview() {
+    try {
+      const stats = await api('/admin/stats');
+      const rev = document.getElementById('total-revenue');
+      const plays = document.getElementById('total-plays');
+      const active = document.getElementById('active-ads');
+      if (rev) rev.textContent = '$' + (stats.total_revenue_usd || 0).toFixed(2);
+      if (plays) plays.textContent = stats.total_plays || 0;
+      if (active) active.textContent = (stats.ads || []).filter(a => a.active).length;
+    } catch(e) { console.error(e); }
+  }
+
+  async function loadAds() {
+    try {
+      const stats = await api('/admin/stats');
+      const container = document.getElementById('ads-list');
+      if (!container) return;
+      container.innerHTML = '';
+      (stats.ads || []).forEach(ad => {
+        const div = document.createElement('div');
+        div.className = `bg-slate-900 rounded-2xl p-4 flex justify-between items-start ${ad.active ? '' : 'opacity-60'}`;
+        div.innerHTML = `
+          <div class="flex-1 min-w-0">
+            <div class="font-medium truncate">${ad.sponsor} <span class="text-xs px-2 py-0.5 rounded bg-slate-800">${ad.id}</span></div>
+            <div class="text-xs text-slate-400 mt-0.5 truncate">${(ad.keywords || []).join(', ')}</div>
+            <div class="text-xs mt-1 text-slate-500">Plays: ${stats.play_counts?.[ad.id] || 0} • Variants: ${(ad.variants || []).length}</div>
+          </div>
+          <div class="flex flex-col gap-1 text-right ml-2">
+            <button onclick="editAd('${ad.id}')" class="small-btn text-sky-400 hover:text-sky-300">Edit</button>
+            <button onclick="toggleAd('${ad.id}')" class="small-btn text-amber-400 hover:text-amber-300">${ad.active ? 'Pause' : 'Activate'}</button>
+            <button onclick="deleteAd('${ad.id}')" class="small-btn text-red-400 hover:text-red-300">Delete</button>
+          </div>
+        `;
+        container.appendChild(div);
+      });
+    } catch(e) { console.error(e); }
+  }
+
+  async function loadFrequency() {
+    try {
+      const s = await api('/admin/settings');
+      const f = s.frequency || {};
+      const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v ?? ''; };
+      set('min-interval', f.min_interval_seconds);
+      set('max-ads', f.max_ads);
+      set('window-seconds', f.window_seconds);
+      set('force-after', f.force_min_ads_after_seconds);
+      set('min-target', f.min_ads_target);
+    } catch(e) { console.error(e); }
+  }
+
+  async function saveFrequency() {
+    const get = id => parseInt(document.getElementById(id).value || '0');
+    const payload = {
+      min_interval_seconds: get('min-interval'),
+      max_ads: get('max-ads'),
+      window_seconds: get('window-seconds'),
+      force_min_ads_after_seconds: get('force-after'),
+      min_ads_target: get('min-target'),
+    };
+    try {
+      await api('/admin/settings', 'PUT', payload);
+      const st = document.getElementById('freq-status');
+      if (st) { st.textContent = 'Saved ✓'; setTimeout(() => { if (st) st.textContent = ''; }, 2000); }
+    } catch(e) { alert('Failed: ' + e.message); }
+  }
+
+  async function loadLogs() {
+    try {
+      const stats = await api('/admin/stats');
+      const container = document.getElementById('logs-list');
+      if (!container) return;
+      container.innerHTML = '';
+      (stats.recent_impressions || []).slice(0, 30).forEach(imp => {
+        const div = document.createElement('div');
+        div.className = 'bg-slate-900 px-3 py-1.5 rounded-xl flex justify-between text-xs';
+        div.innerHTML = `<span>${new Date(imp.ts * 1000).toLocaleString()}</span> <span>${imp.sponsor} • $${imp.revenue_usd.toFixed(4)}</span>`;
+        container.appendChild(div);
+      });
+    } catch(e) { console.error(e); }
+  }
+
+  let currentVariants = [];
+  function renderVariants() {
+    const container = document.getElementById('variants-list');
+    if (!container) return;
+    container.innerHTML = '';
+    currentVariants.forEach((v, idx) => {
+      const div = document.createElement('div');
+      div.className = 'bg-slate-800 rounded-xl p-3 mb-2';
+      div.innerHTML = `
+        <div class="flex justify-between mb-1">
+          <div class="text-xs text-slate-400">Variant ${idx+1}</div>
+          <button onclick="removeVariant(${idx})" class="text-red-400 text-xs">Remove</button>
+        </div>
+        <input placeholder="Keywords (comma sep)" value="${(v.keywords || []).join(', ')}" 
+               onchange="updateVariant(${idx}, 'keywords', this.value)" class="w-full bg-slate-700 rounded px-2 py-1 text-sm mb-1">
+        <textarea placeholder="Script for this variant" onchange="updateVariant(${idx}, 'script', this.value)" 
+                  class="w-full bg-slate-700 rounded px-2 py-1 text-sm h-16">${v.script || ''}</textarea>
+      `;
+      container.appendChild(div);
+    });
+  }
+  function addVariant() { currentVariants.push({ keywords: [], script: '' }); renderVariants(); }
+  function removeVariant(idx) { currentVariants.splice(idx, 1); renderVariants(); }
+  function updateVariant(idx, field, value) {
+    if (field === 'keywords') currentVariants[idx].keywords = value.split(',').map(s => s.trim()).filter(Boolean);
+    else currentVariants[idx].script = value;
+  }
+
+  async function editAd(id) {
+    try {
+      const stats = await api('/admin/stats');
+      const ad = (stats.ads || []).find(a => a.id === id);
+      if (!ad) return;
+      currentVariants = (ad.variants || []).map(v => ({...v}));
+      const html = `
+        <h3 class="font-semibold text-xl mb-4">Edit Sponsor Ad</h3>
+        <div class="space-y-4 text-sm">
+          <div><label class="text-xs text-slate-400">Sponsor</label><input id="m-sponsor" value="${ad.sponsor || ''}" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2.5"></div>
+          <div><label class="text-xs text-slate-400">Main Script</label><textarea id="m-script" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2.5 h-20">${ad.script || ''}</textarea></div>
+          <div class="grid grid-cols-2 gap-3">
+            <div><label class="text-xs text-slate-400">Bid CPM</label><input id="m-bid" type="number" step="0.5" value="${ad.bid_cpm || 0}" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2.5"></div>
+            <div><label class="text-xs text-slate-400">Daily Cap</label><input id="m-cap" type="number" value="${ad.daily_cap || 100}" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2.5"></div>
+          </div>
+          <div>
+            <div class="flex justify-between items-center mb-2">
+              <label class="text-xs text-slate-400">Keyword Variants (optional)</label>
+              <button onclick="addVariant()" class="text-xs px-3 py-1 bg-slate-700 rounded">+ Add Variant</button>
+            </div>
+            <div id="variants-list" class="max-h-48 overflow-auto"></div>
+          </div>
+          <div class="flex items-center gap-4 pt-2">
+            <label class="flex items-center gap-2 text-xs"><input type="checkbox" id="m-active" ${ad.active ? 'checked' : ''} class="w-4 h-4"> Active</label>
+          </div>
+        </div>
+        <div class="flex gap-3 mt-6">
+          <button onclick="saveAdEdit('${id}')" class="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-500 rounded-2xl">Save</button>
+          <button onclick="hideModal()" class="px-6 py-2.5 bg-slate-700 rounded-2xl">Cancel</button>
+        </div>
+      `;
+      const mc = document.getElementById('modal-content');
+      const md = document.getElementById('modal');
+      if (mc) mc.innerHTML = html;
+      if (md) { md.classList.remove('hidden'); md.classList.add('flex'); }
+      setTimeout(renderVariants, 50);
+    } catch(e) { console.error(e); }
+  }
+
+  async function saveAdEdit(id) {
+    const payload = {
+      sponsor: document.getElementById('m-sponsor').value,
+      script: document.getElementById('m-script').value,
+      bid_cpm: parseFloat(document.getElementById('m-bid').value),
+      daily_cap: parseInt(document.getElementById('m-cap').value),
+      active: document.getElementById('m-active').checked,
+      variants: currentVariants
+    };
+    try {
+      await api(`/admin/ads/${id}`, 'PUT', payload);
+      hideModal();
+      loadAds();
+    } catch(e) { alert('Save failed'); }
+  }
+
+  async function toggleAd(id) {
+    if (!confirm("Toggle this ad's active state?")) return;
+    try { await api(`/admin/ads/${id}/toggle`, 'POST'); loadAds(); } catch(e){alert(e.message);}
+  }
+
+  async function deleteAd(id) {
+    if (!confirm("Permanently delete this ad?")) return;
+    try { await api(`/admin/ads/${id}`, 'DELETE'); loadAds(); } catch(e){alert(e.message);}
+  }
+
+  function showCreateAdModal() {
+    const html = `
+      <h3 class="font-semibold text-xl mb-4">Create New Ad</h3>
+      <div class="space-y-3 text-sm">
+        <input id="c-sponsor" placeholder="Sponsor Name" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2.5">
+        <input id="c-keywords" placeholder="Keywords (comma separated)" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2.5">
+        <textarea id="c-script" placeholder="Main ad script" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2.5 h-20"></textarea>
+        <div class="grid grid-cols-2 gap-3">
+          <input id="c-bid" type="number" step="0.5" value="10" class="bg-slate-800 border border-slate-700 rounded-xl px-4 py-2.5" placeholder="Bid CPM">
+          <input id="c-cap" type="number" value="100" class="bg-slate-800 border border-slate-700 rounded-xl px-4 py-2.5" placeholder="Daily Cap">
+        </div>
+        <button onclick="createAd()" class="w-full py-2.5 bg-sky-600 hover:bg-sky-500 rounded-2xl">Create</button>
       </div>
     `;
-    container.appendChild(div);
-  });
-}
-
-async function loadFrequency() {
-  try {
-    const s = await api('/admin/settings');
-    const f = s.frequency || {};
-    document.getElementById('min-interval').value = f.min_interval_seconds ?? 90;
-    document.getElementById('max-ads').value = f.max_ads ?? 2;
-    document.getElementById('window-seconds').value = f.window_seconds ?? 600;
-    document.getElementById('force-after').value = f.force_min_ads_after_seconds ?? 300;
-    document.getElementById('min-target').value = f.min_ads_target ?? 1;
-  } catch(e) { console.error(e); }
-}
-
-async function saveFrequency() {
-  const payload = {
-    min_interval_seconds: parseInt(document.getElementById('min-interval').value),
-    max_ads: parseInt(document.getElementById('max-ads').value),
-    window_seconds: parseInt(document.getElementById('window-seconds').value),
-    force_min_ads_after_seconds: parseInt(document.getElementById('force-after').value),
-    min_ads_target: parseInt(document.getElementById('min-target').value),
-  };
-  try {
-    await api('/admin/settings', 'PUT', payload);
-    document.getElementById('freq-status').textContent = 'Saved ✓';
-    setTimeout(() => document.getElementById('freq-status').textContent = '', 2000);
-  } catch(e) { alert('Failed: ' + e.message); }
-}
-
-async function loadLogs() {
-  const stats = await api('/admin/stats');
-  const container = document.getElementById('logs-list');
-  container.innerHTML = '';
-  (stats.recent_impressions || []).slice(0, 30).forEach(imp => {
-    const div = document.createElement('div');
-    div.className = 'bg-slate-900 px-3 py-1.5 rounded-xl flex justify-between text-xs';
-    div.innerHTML = `<span>${new Date(imp.ts * 1000).toLocaleString()}</span> <span>${imp.sponsor} • $${imp.revenue_usd.toFixed(4)}</span>`;
-    container.appendChild(div);
-  });
-}
-
-// ===== VARIANT SUPPORT IN EDIT MODAL =====
-let currentVariants = [];
-
-function renderVariants() {
-  const container = document.getElementById('variants-list');
-  if (!container) return;
-  container.innerHTML = '';
-  currentVariants.forEach((v, idx) => {
-    const div = document.createElement('div');
-    div.className = 'bg-slate-800 rounded-xl p-3 mb-2';
-    div.innerHTML = `
-      <div class="flex justify-between mb-1">
-        <div class="text-xs text-slate-400">Variant ${idx+1}</div>
-        <button onclick="removeVariant(${idx})" class="text-red-400 text-xs">Remove</button>
-      </div>
-      <input placeholder="Keywords (comma sep)" value="${(v.keywords || []).join(', ')}" 
-             onchange="updateVariant(${idx}, 'keywords', this.value)" class="w-full bg-slate-700 rounded px-2 py-1 text-sm mb-1">
-      <textarea placeholder="Script for this variant" onchange="updateVariant(${idx}, 'script', this.value)" 
-                class="w-full bg-slate-700 rounded px-2 py-1 text-sm h-16">${v.script || ''}</textarea>
-    `;
-    container.appendChild(div);
-  });
-}
-
-function addVariant() {
-  currentVariants.push({ keywords: [], script: '' });
-  renderVariants();
-}
-
-function removeVariant(idx) {
-  currentVariants.splice(idx, 1);
-  renderVariants();
-}
-
-function updateVariant(idx, field, value) {
-  if (field === 'keywords') {
-    currentVariants[idx].keywords = value.split(',').map(s => s.trim()).filter(Boolean);
-  } else {
-    currentVariants[idx].script = value;
-  }
-}
-
-async function editAd(id) {
-  const stats = await api('/admin/stats');
-  const ad = (stats.ads || []).find(a => a.id === id);
-  if (!ad) return;
-
-  currentVariants = (ad.variants || []).map(v => ({...v}));
-
-  const html = `
-    <h3 class="font-semibold text-xl mb-4">Edit Sponsor Ad</h3>
-    <div class="space-y-4 text-sm">
-      <div>
-        <label class="text-xs text-slate-400">Sponsor</label>
-        <input id="m-sponsor" value="${ad.sponsor || ''}" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2.5">
-      </div>
-      <div>
-        <label class="text-xs text-slate-400">Main Script</label>
-        <textarea id="m-script" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2.5 h-20">${ad.script || ''}</textarea>
-      </div>
-
-      <div class="grid grid-cols-2 gap-3">
-        <div>
-          <label class="text-xs text-slate-400">Bid CPM</label>
-          <input id="m-bid" type="number" step="0.5" value="${ad.bid_cpm || 0}" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2.5">
-        </div>
-        <div>
-          <label class="text-xs text-slate-400">Daily Cap</label>
-          <input id="m-cap" type="number" value="${ad.daily_cap || 100}" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2.5">
-        </div>
-      </div>
-
-      <div>
-        <div class="flex justify-between items-center mb-2">
-          <label class="text-xs text-slate-400">Keyword Variants (optional)</label>
-          <button onclick="addVariant()" class="text-xs px-3 py-1 bg-slate-700 rounded">+ Add Variant</button>
-        </div>
-        <div id="variants-list" class="max-h-48 overflow-auto"></div>
-      </div>
-
-      <div class="flex items-center gap-4 pt-2">
-        <label class="flex items-center gap-2 text-xs">
-          <input type="checkbox" id="m-active" ${ad.active ? 'checked' : ''} class="w-4 h-4"> Active
-        </label>
-      </div>
-    </div>
-
-    <div class="flex gap-3 mt-6">
-      <button onclick="saveAdEdit('${id}')" class="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-500 rounded-2xl">Save</button>
-      <button onclick="hideModal()" class="px-6 py-2.5 bg-slate-700 rounded-2xl">Cancel</button>
-    </div>
-  `;
-  document.getElementById('modal-content').innerHTML = html;
-  document.getElementById('modal').classList.remove('hidden');
-  document.getElementById('modal').classList.add('flex');
-
-  // Render variants after DOM is ready
-  setTimeout(renderVariants, 50);
-}
-
-async function saveAdEdit(id) {
-  const payload = {
-    sponsor: document.getElementById('m-sponsor').value,
-    script: document.getElementById('m-script').value,
-    bid_cpm: parseFloat(document.getElementById('m-bid').value),
-    daily_cap: parseInt(document.getElementById('m-cap').value),
-    active: document.getElementById('m-active').checked,
-    variants: currentVariants
-  };
-  await api(`/admin/ads/${id}`, 'PUT', payload);
-  hideModal();
-  loadAds();
-}
-
-async function toggleAd(id) {
-  if (!confirm('Toggle this ad's active state?')) return;
-  await api(`/admin/ads/${id}/toggle`, 'POST');
-  loadAds();
-}
-
-async function deleteAd(id) {
-  if (!confirm('Permanently delete this ad?')) return;
-  await api(`/admin/ads/${id}`, 'DELETE');
-  loadAds();
-}
-
-function showCreateAdModal() {
-  const html = `
-    <h3 class="font-semibold text-xl mb-4">Create New Ad</h3>
-    <div class="space-y-3 text-sm">
-      <input id="c-sponsor" placeholder="Sponsor Name" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2.5">
-      <input id="c-keywords" placeholder="Keywords (comma separated)" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2.5">
-      <textarea id="c-script" placeholder="Main ad script" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2.5 h-20"></textarea>
-      <div class="grid grid-cols-2 gap-3">
-        <input id="c-bid" type="number" step="0.5" value="10" class="bg-slate-800 border border-slate-700 rounded-xl px-4 py-2.5" placeholder="Bid CPM">
-        <input id="c-cap" type="number" value="100" class="bg-slate-800 border border-slate-700 rounded-xl px-4 py-2.5" placeholder="Daily Cap">
-      </div>
-      <button onclick="createAd()" class="w-full py-2.5 bg-sky-600 hover:bg-sky-500 rounded-2xl">Create</button>
-    </div>
-  `;
-  document.getElementById('modal-content').innerHTML = html;
-  document.getElementById('modal').classList.remove('hidden');
-  document.getElementById('modal').classList.add('flex');
-}
-
-async function createAd() {
-  const payload = {
-    sponsor: document.getElementById('c-sponsor').value,
-    industry: 'general',
-    keywords: document.getElementById('c-keywords').value.split(',').map(s => s.trim()).filter(Boolean),
-    script: document.getElementById('c-script').value,
-    bid_cpm: parseFloat(document.getElementById('c-bid').value) || 8,
-    daily_cap: parseInt(document.getElementById('c-cap').value) || 100,
-    weight: 1.0,
-    variants: []
-  };
-  await api('/admin/ads', 'POST', payload);
-  hideModal();
-  loadAds();
-}
-
-function hideModal() {
-  document.getElementById('modal').classList.add('hidden');
-  document.getElementById('modal').classList.remove('flex');
-}
-
-function toggleMobileSidebar() {
-  const sb = document.getElementById('sidebar');
-  sb.classList.toggle('open');
-}
-
-async function installPWA() {
-  if (window.deferredPrompt) {
-    window.deferredPrompt.prompt();
-  } else {
-    alert('Use browser menu → Add to Home Screen');
-  }
-}
-
-async function init() {
-  applySavedTheme();
-
-  window.addEventListener('beforeinstallprompt', (e) => {
-    e.preventDefault();
-    window.deferredPrompt = e;
-  });
-
-  if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('/sw.js').catch(() => {});
+    const mc = document.getElementById('modal-content');
+    const md = document.getElementById('modal');
+    if (mc) mc.innerHTML = html;
+    if (md) { md.classList.remove('hidden'); md.classList.add('flex'); }
   }
 
-  if (!ADMIN_TOKEN) {
-    const tok = prompt('Enter Admin Token:');
-    if (tok) setToken(tok);
+  async function createAd() {
+    const payload = {
+      sponsor: document.getElementById('c-sponsor').value,
+      industry: 'general',
+      keywords: document.getElementById('c-keywords').value.split(',').map(s => s.trim()).filter(Boolean),
+      script: document.getElementById('c-script').value,
+      bid_cpm: parseFloat(document.getElementById('c-bid').value) || 8,
+      daily_cap: parseInt(document.getElementById('c-cap').value) || 100,
+      weight: 1.0,
+      variants: []
+    };
+    try {
+      await api('/admin/ads', 'POST', payload);
+      hideModal();
+      loadAds();
+    } catch(e) { alert('Create failed'); }
   }
 
-  await loadOverview();
-  document.getElementById('last-updated').textContent = new Date().toLocaleTimeString();
+  function hideModal() {
+    const md = document.getElementById('modal');
+    if (md) { md.classList.add('hidden'); md.classList.remove('flex'); }
+  }
 
-  setInterval(() => {
-    if (document.getElementById('overview').classList.contains('active')) loadOverview();
-  }, 15000);
+  function toggleMobileSidebar() {
+    const sb = document.getElementById('sidebar');
+    if (sb) sb.classList.toggle('open');
+  }
+
+  async function installPWA() {
+    if (window.deferredPrompt) window.deferredPrompt.prompt();
+    else alert('Use browser menu → Add to Home Screen');
+  }
+
+  async function init() {
+    applySavedTheme();
+    window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); window.deferredPrompt = e; });
+    if ('serviceWorker' in navigator) { navigator.serviceWorker.register('/sw.js').catch(()=>{}); }
+    if (!ADMIN_TOKEN) {
+      const tok = prompt('Enter Admin Token:');
+      if (tok) setToken(tok);
+    }
+    await loadOverview();
+    const lu = document.getElementById('last-updated');
+    if (lu) lu.textContent = new Date().toLocaleTimeString();
+    setInterval(() => {
+      const ov = document.getElementById('overview');
+      if (ov && ov.classList.contains('active')) loadOverview();
+    }, 15000);
+  }
+
+  init();
+} catch(e) {
+  console.error('Dashboard failed:', e);
+  alert('Dashboard error. Hard refresh and redeploy. ' + e.message);
 }
-
-init();
 </script>
 </body>
 </html>
 """
-
 
 @app.on_event("startup")
 async def _on_startup():
@@ -2286,50 +2245,6 @@ async def _on_startup():
     except Exception as exc:
         log.error(f"[db] init failed: {exc} — running with in-memory state only")
 
-
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)), log_level="info")
-
-def db_load_settings() -> dict:
-    """Load all settings from DB as dict. Falls back to FREQUENCY defaults."""
-    if not DB_PATH:
-        return dict(FREQUENCY)
-    try:
-        with sqlite3.connect(DB_PATH) as conn:
-            c = conn.cursor()
-            rows = c.execute("SELECT key, value FROM settings").fetchall()
-            loaded = {row[0]: row[1] for row in rows}
-            # Merge with defaults
-            result = dict(FREQUENCY)
-            for k, v in loaded.items():
-                if k in result:
-                    try:
-                        result[k] = int(v) if v.isdigit() else v
-                    except:
-                        result[k] = v
-            return result
-    except Exception as e:
-        log.warning(f"[db] failed to load settings: {e}")
-        return dict(FREQUENCY)
-
-def db_save_setting(key: str, value: any):
-    """Save a single setting to DB."""
-    if not DB_PATH:
-        # In-memory only if no DB
-        FREQUENCY[key] = int(value) if str(value).isdigit() else value
-        return
-    try:
-        with sqlite3.connect(DB_PATH) as conn:
-            c = conn.cursor()
-            c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
-            conn.commit()
-        # Update runtime
-        if key in FREQUENCY:
-            FREQUENCY[key] = int(value) if str(value).isdigit() else value
-        log.info(f"[db] saved setting {key}={value}")
-    except Exception as e:
-        log.warning(f"[db] failed to save setting {key}: {e}")
-
-# Global runtime frequency (loaded on startup)
-FREQUENCY_SETTINGS = {}
