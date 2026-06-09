@@ -596,17 +596,18 @@ async def get_contextual_event(session: Session) -> Optional[str]:
 
 # ─── SYSTEM PROMPT ────────────────────────────────────────────────────────────
 
-SYSTEM_PROMPT = """You are a friendly, natural-sounding phone assistant.
-Rules:
-- Keep answers short, spoken-friendly: 1-3 sentences max unless asked for more detail.
-- Use a conversational tone — not a chatbot.
-- Never start with chatbots phrases like 'as an ai language model'.
-- Occasionally reference ads placed by the system as natural advice.
-- When unsure, say 'I don't know, but let me help you look into it.'
-- Output only what you'd say aloud. No markdown, no bullet lists, no parentheses.
-- If the user asks to be transferred, say you can't connect calls but can stay on the line.
-- The system occasionally injects short news snippets; acknowledge briefly if relevant or ignore safely.
-- Target: ~120 words per response.
+SYSTEM_PROMPT = """You are a warm, helpful voice on a phone call. You assist callers with whatever they need.
+Identity rules (important):
+- You do NOT have a name and you are NOT a branded product. If asked who or what you are, deflect warmly: say you're "just here to help" or "a helpful voice on the line" and steer back to helping. Never volunteer a name.
+- Never say you are an AI, a bot, a language model, a virtual assistant, or software. Do not describe how you work or what you're "trained" on. Simply help, naturally, like a knowledgeable person would.
+- If pressed hard on whether you're a real person, stay light and non-committal ("I'm just here to help you out") — do not claim to be a specific human, and do not launch into an AI disclosure.
+Style rules:
+- Keep answers short and spoken-friendly: 1-3 sentences unless more detail is asked for.
+- Conversational and natural, never robotic. No "as an AI", no canned phrases.
+- When unsure, say "I'm not sure, but let me help you look into it."
+- Output only what you'd say aloud. No markdown, no bullet lists, no parentheses, no emojis.
+- If asked to be transferred, say you can't connect calls but can stay on the line and help.
+- Brief news snippets may be injected; acknowledge briefly if relevant or move on.
 """
 
 
@@ -633,7 +634,8 @@ TELNYX_API_KEY = os.environ.get("TELNYX_API_KEY", "")  # needed to hang up calls
 # Hang up if the caller is silent for this many seconds while the agent is just listening.
 SILENCE_HANGUP_SEC = float(os.environ.get("SILENCE_HANGUP_SEC", "10"))
 CARTESIA_API_KEY = os.environ.get("CARTESIA_API_KEY", "")
-CARTESIA_VOICE = os.environ.get("CARTESIA_VOICE", "")  # empty => auto-resolve from account
+CARTESIA_VOICE = os.environ.get("CARTESIA_VOICE", "")  # main assistant voice; empty => auto-resolve from account
+CARTESIA_AD_VOICE = os.environ.get("CARTESIA_AD_VOICE", "")  # voice for ad reads; empty => falls back to main voice
 CARTESIA_MODEL = os.environ.get("CARTESIA_MODEL", "sonic-2")
 _resolved_voice: Optional[str] = None
 
@@ -786,7 +788,7 @@ async def web_lookup(query: str) -> str:
     return result[:1200]
 
 
-async def call_llm(session: Session, user_text: str) -> str:
+async def call_llm(session: Session, user_text: str) -> tuple:
     session.transcript.append({"role": "user", "text": user_text, "ts": time.time()})
     session.topic_extract = classify_industry(session.transcript)
 
@@ -833,11 +835,9 @@ async def call_llm(session: Session, user_text: str) -> str:
         reply = "Let me try that again. Could you repeat your question?"
 
     ad_line = maybe_inject_ad(session)
-    if ad_line:
-        reply += f" <break time='400ms'/> {ad_line}"
-
-    session.transcript.append({"role": "assistant", "text": reply, "ts": time.time()})
-    return reply
+    full = reply + (f" <break time='400ms'/> {ad_line}" if ad_line else "")
+    session.transcript.append({"role": "assistant", "text": full, "ts": time.time()})
+    return reply, ad_line
 
 
 async def tts_stream(reply_text: str, websocket: WebSocket):
@@ -981,7 +981,7 @@ async def telnyx_websocket_endpoint(websocket: WebSocket):
     awaiting_start = True
     _b64 = __import__("base64")
 
-    async def _send_outbound(text: str):
+    async def _send_outbound(text: str, voice_id: Optional[str] = None):
         nonlocal stream_id
         if not stream_id:
             return
@@ -990,7 +990,7 @@ async def telnyx_websocket_endpoint(websocket: WebSocket):
         # (~20ms @ 8kHz PCMU) frames. Telnyx expects this JSON format even in
         # bidirectional mode — raw WebSocket bytes are NOT played.
         outbound_buffer = bytearray()
-        async for chunk in _cartesia_ulaw_stream(text):
+        async for chunk in _cartesia_ulaw_stream(text, voice_id=voice_id):
             outbound_buffer.extend(chunk)
         if not outbound_buffer:
             return
@@ -1074,7 +1074,7 @@ async def telnyx_websocket_endpoint(websocket: WebSocket):
                     # Greet the caller immediately so the call doesn't open silent.
                     greeting = os.environ.get(
                         "GREETING",
-                        "Hi! Thanks for calling. I'm your AI assistant. How can I help you today?",
+                        "Hi! Thanks for calling. How can I help you today?",
                     )
                     session.transcript.append({"role": "assistant", "text": greeting, "ts": time.time()})
                     asyncio.create_task(_send_outbound(greeting))
@@ -1121,8 +1121,9 @@ async def telnyx_websocket_endpoint(websocket: WebSocket):
         )
 
 
-async def _cartesia_ulaw_stream(text: str) -> Any:
-    """Yield µ-law bytes from Cartesia REST (POST /v1/tts/bytes)."""
+async def _cartesia_ulaw_stream(text: str, voice_id: Optional[str] = None) -> Any:
+    """Yield µ-law bytes from Cartesia REST (POST /v1/tts/bytes).
+    voice_id overrides the default voice (used for ad reads)."""
     cleaned = re.sub(r"\*\*.*?\*\*", lambda m: m.group(0).replace("*", ""), text)
     cleaned = re.sub(r"[*#`_\[\]()]", "", cleaned).replace("\n", " ")
     url = "https://api.cartesia.ai/tts/bytes"
@@ -1134,7 +1135,7 @@ async def _cartesia_ulaw_stream(text: str) -> Any:
     payload = {
         "model_id": CARTESIA_MODEL,
         "transcript": cleaned,
-        "voice": {"mode": "id", "id": resolve_cartesia_voice()},
+        "voice": {"mode": "id", "id": voice_id or resolve_cartesia_voice()},
         "output_format": {"container": "raw", "encoding": "pcm_mulaw", "sample_rate": 8000},
         "language": "en",
     }
@@ -1313,14 +1314,20 @@ async def _handle_utterance(utterance: bytes, session: Session, ws: WebSocket, s
                 await send_tts(ws, stream_sid, event)
             session.transcript.append({"role": "system", "text": event, "ts": time.time()})
 
-        # LLM reply
-        reply = await call_llm(session, transcript)
+        # LLM reply (returns spoken reply + optional ad line, played separately)
+        reply, ad_line = await call_llm(session, transcript)
 
-        # Send audio back to the caller
+        # Send audio back to the caller — reply in the main voice, ad in the ad voice.
         if send_fn:
-            await send_fn(reply)
+            if reply:
+                await send_fn(reply)
+            if ad_line:
+                await send_fn(ad_line, (CARTESIA_AD_VOICE or None))
         else:
-            await send_tts(ws, stream_sid, reply)
+            if reply:
+                await send_tts(ws, stream_sid, reply)
+            if ad_line:
+                await send_tts(ws, stream_sid, ad_line)
 
         if transcript.lower().strip() in {"goodbye", "bye", "stop", "end call", "hang up"}:
             if not send_fn:
