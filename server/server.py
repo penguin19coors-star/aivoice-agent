@@ -738,15 +738,12 @@ def needs_web_lookup(text: str, transcript=None):
 
     # "what is / who is / where is" style questions:
     # Only search if it smells like current/business info.
-    # Skip pure static geography/history that the model knows.
     if any(b in t for b in ("what is", "who is", "how much", "price", "where is", "what are")):
         if hist:
             return False
-        # If it has business/current flavor words, search
         business_flavor = ("price", "cost", "open", "store", "company", "stock", "news", "game", "weather", "today", "now")
         if any(w in t for w in business_flavor):
             return True
-        # Otherwise leave static facts (capitals, historical definitions, etc.) to the model
         return False
 
     # Follow-up context
@@ -755,34 +752,6 @@ def needs_web_lookup(text: str, transcript=None):
         if any(m in recent for m in CURRENT_MARKERS) and not hist:
             return True
     return False
-    t = text.lower().strip()
-
-    # Business / local lookups — always search (core requirement)
-    if any(x in t for x in ("phone", "address", "hours", "open", "directions", "near me", "closest", "nearest")):
-        return True
-
-    # Hard categories the user specified
-    if any(p in t for p in MUST_SEARCH):
-        return True
-
-    # Current-time language
-    has_now = any(m in t for m in CURRENT_MARKERS)
-    hist = any(h in t for h in HISTORICAL_SKIP)
-    if has_now and not hist:
-        return True
-
-    # "what is / who is" style only if not historical
-    if any(b in t for b in ("what is", "who is", "how much", "price", "where is")):
-        return not hist
-
-    # Follow-up context (last few turns)
-    if transcript:
-        recent = " ".join(m.get("text","") for m in transcript[-3:] if m.get("role")=="user").lower()
-        if any(m in recent for m in CURRENT_MARKERS) and not hist:
-            return True
-    return False
-
-
 
 async def web_lookup(query: str) -> str:
     """Query Serper.dev (Google) and return clean factual text the LLM can read
