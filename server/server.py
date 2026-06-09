@@ -197,10 +197,7 @@ class Session:
                 "wss://api.deepgram.com/v1/listen?"
                 "encoding=mulaw&sample_rate=8000&channels=1&language=en-US&punctuate=true&interim_results=true"
             )
-            headers = {
-                "Authorization": f"Token {DEEPGRAM_API_KEY}",
-                "Content-Type": "application/json",
-            }
+            headers = {"Authorization": f"Token {DEEPGRAM_API_KEY}"}
             self.dg_ws = await ws_connect(url, headers=headers, close_timeout=5)
         return self.dg_ws
 
@@ -526,12 +523,13 @@ async def tts_stream(reply_text: str, websocket: WebSocket):
             for chunk in r.iter_bytes():
                 await websocket.send_bytes(chunk)
 
-    else:  # cartesia default
-        url = (
-            "wss://api.cartesia.ai/tts/websocket"
-            f"?api_key={CARTESIA_API_KEY}&cartesia_version=2024-06-10"
-        )
-        headers = {"Cartesia-Version": "2024-06-10", "X-API-Key": CARTESIA_API_KEY}
+    else:  # cartesia default — REST (POST /tts/bytes), matches Telnyx path
+        url = "https://api.cartesia.ai/tts/bytes"
+        headers = {
+            "Cartesia-Version": "2024-06-10",
+            "X-API-Key": CARTESIA_API_KEY,
+            "Content-Type": "application/json",
+        }
         payload = {
             "model_id": CARTESIA_MODEL,
             "transcript": text,
@@ -542,28 +540,10 @@ async def tts_stream(reply_text: str, websocket: WebSocket):
             },
             "language": "en",
         }
-        ws = await ws_connect(url, headers=headers, close_timeout=5)
-        try:
-            await ws.send(json.dumps(payload))
-            while True:
-                try:
-                    msg = await asyncio.wait_for(ws.recv(), timeout=8)
-                except asyncio.TimeoutError:
-                    break
-                if isinstance(msg, bytes):
-                    await websocket.send_bytes(msg)
-                else:
-                    try:
-                        data = json.loads(msg)
-                    except Exception:
-                        continue
-                    if data.get("event") == "done":
-                        break
-                    if data.get("error"):
-                        log.warning(f"[tts:cartesia] {data.get('error')}")
-                        break
-        finally:
-            await ws.close()
+        with http.stream("POST", url, headers=headers, json=payload) as r:
+            r.raise_for_status()
+            for chunk in r.iter_bytes():
+                await websocket.send_bytes(chunk)
 
     await websocket.send_json({"type": "audio_done"})
 
@@ -752,14 +732,15 @@ async def telnyx_websocket_endpoint(websocket: WebSocket):
 
 
 async def _cartesia_ulaw_stream(text: str) -> Any:
-    """Yield µ-law bytes from Cartesia for outbound audio."""
+    """Yield µ-law bytes from Cartesia REST (POST /v1/tts/bytes)."""
     cleaned = re.sub(r"\*\*.*?\*\*", lambda m: m.group(0).replace("*", ""), text)
     cleaned = re.sub(r"[*#`_\[\]()]", "", cleaned).replace("\n", " ")
-    url = (
-        "wss://api.cartesia.ai/tts/websocket"
-        f"?api_key={CARTESIA_API_KEY}&cartesia_version=2024-06-10"
-    )
-    headers = {"Cartesia-Version": "2024-06-10", "X-API-Key": CARTESIA_API_KEY}
+    url = "https://api.cartesia.ai/tts/bytes"
+    headers = {
+        "Cartesia-Version": "2024-06-10",
+        "X-API-Key": CARTESIA_API_KEY,
+        "Content-Type": "application/json",
+    }
     payload = {
         "model_id": CARTESIA_MODEL,
         "transcript": cleaned,
@@ -767,28 +748,10 @@ async def _cartesia_ulaw_stream(text: str) -> Any:
         "output_format": {"encoding": "mulaw", "sample_rate": 8000},
         "language": "en",
     }
-    ws = await ws_connect(url, headers=headers, close_timeout=5)
-    try:
-        await ws.send(json.dumps(payload))
-        while True:
-            try:
-                msg = await asyncio.wait_for(ws.recv(), timeout=8)
-            except asyncio.TimeoutError:
-                break
-            if isinstance(msg, bytes):
-                yield msg
-            else:
-                try:
-                    data = json.loads(msg)
-                except Exception:
-                    continue
-                if data.get("event") == "done":
-                    break
-                if data.get("error"):
-                    log.warning(f"[tts:cartesia] {data.get('error')}")
-                    break
-    finally:
-        await ws.close()
+    with http.stream("POST", url, headers=headers, json=payload) as r:
+        r.raise_for_status()
+        for chunk in r.iter_bytes():
+            yield chunk
 
 
 # Keep Twilio/WebSocket handler and remaining server code.
