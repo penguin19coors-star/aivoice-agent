@@ -535,13 +535,16 @@ async def tts_stream(reply_text: str, websocket: WebSocket):
             "transcript": text,
             "voice": {"mode": "id", "id": CARTESIA_VOICE},
             "output_format": {
-                "encoding": "mulaw",
+                "container": "raw",
+                "encoding": "pcm_mulaw",
                 "sample_rate": 8000,
             },
             "language": "en",
         }
         with http.stream("POST", url, headers=headers, json=payload) as r:
-            r.raise_for_status()
+            if r.status_code != 200:
+                log.warning(f"[tts:cartesia] HTTP {r.status_code}: {r.read()[:400]!r}")
+                return
             for chunk in r.iter_bytes():
                 await websocket.send_bytes(chunk)
 
@@ -745,11 +748,14 @@ async def _cartesia_ulaw_stream(text: str) -> Any:
         "model_id": CARTESIA_MODEL,
         "transcript": cleaned,
         "voice": {"mode": "id", "id": CARTESIA_VOICE},
-        "output_format": {"encoding": "mulaw", "sample_rate": 8000},
+        "output_format": {"container": "raw", "encoding": "pcm_mulaw", "sample_rate": 8000},
         "language": "en",
     }
     with http.stream("POST", url, headers=headers, json=payload) as r:
-        r.raise_for_status()
+        if r.status_code != 200:
+            body = r.read()
+            log.warning(f"[tts:cartesia] HTTP {r.status_code}: {body[:400]!r}")
+            return
         for chunk in r.iter_bytes():
             yield chunk
 
