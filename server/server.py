@@ -167,7 +167,7 @@ def db_init():
             CREATE TABLE IF NOT EXISTS ads (
                 id TEXT PRIMARY KEY, sponsor TEXT, industry TEXT, keywords TEXT,
                 script TEXT, cta TEXT, bid_cpm REAL, daily_cap INTEGER,
-                weight REAL, active INTEGER
+                weight REAL, active INTEGER, variants TEXT
             );
             CREATE TABLE IF NOT EXISTS impressions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, ad_id TEXT, session_id TEXT,
@@ -177,6 +177,13 @@ def db_init():
             """
         )
         c.commit()
+
+        # Migration: add variants column to pre-existing DBs that lack it.
+        cols = {row["name"] for row in c.execute("PRAGMA table_info(ads)").fetchall()}
+        if "variants" not in cols:
+            c.execute("ALTER TABLE ads ADD COLUMN variants TEXT")
+            c.commit()
+            log.info("[db] migrated: added ads.variants column")
 
         # Seed ads from the hardcoded defaults only if the table is empty.
         n = c.execute("SELECT COUNT(*) AS n FROM ads").fetchone()["n"]
@@ -195,6 +202,7 @@ def db_init():
                     "keywords": json.loads(r["keywords"] or "[]"), "script": r["script"],
                     "cta": r["cta"], "bid_cpm": r["bid_cpm"], "daily_cap": r["daily_cap"],
                     "weight": r["weight"], "active": bool(r["active"]),
+                    "variants": json.loads(r["variants"] or "[]") if "variants" in r.keys() else [],
                 })
             log.info(f"[db] loaded {len(AD_DB)} ads from {DB_PATH}")
 
@@ -224,17 +232,18 @@ def db_init():
 
 def _db_upsert_ad(c: sqlite3.Connection, ad: Dict[str, Any]):
     c.execute(
-        """INSERT INTO ads (id,sponsor,industry,keywords,script,cta,bid_cpm,daily_cap,weight,active)
-           VALUES (?,?,?,?,?,?,?,?,?,?)
+        """INSERT INTO ads (id,sponsor,industry,keywords,script,cta,bid_cpm,daily_cap,weight,active,variants)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?)
            ON CONFLICT(id) DO UPDATE SET sponsor=excluded.sponsor,industry=excluded.industry,
              keywords=excluded.keywords,script=excluded.script,cta=excluded.cta,
              bid_cpm=excluded.bid_cpm,daily_cap=excluded.daily_cap,weight=excluded.weight,
-             active=excluded.active""",
+             active=excluded.active,variants=excluded.variants""",
         (
             ad["id"], ad.get("sponsor"), ad.get("industry"),
             json.dumps(ad.get("keywords", [])), ad.get("script"), ad.get("cta"),
             ad.get("bid_cpm", 0.0), ad.get("daily_cap", 100),
             ad.get("weight", 1.0), 1 if ad.get("active", True) else 0,
+            json.dumps(ad.get("variants", [])),
         ),
     )
 
@@ -341,6 +350,10 @@ class Session:
     last_voice_at: float = 0.0
     in_speech: bool = False
     is_processing: bool = False
+    is_speaking: bool = False          # True while agent TTS is playing out
+    last_heard_at: float = 0.0         # last time we detected caller voice
+    call_control_id: Optional[str] = None
+    hung_up: bool = False
 
     async def ensure_dg_ws(self) -> Any:
         if self.dg_ws is None or getattr(self.dg_ws, "closed", False):
@@ -439,13 +452,32 @@ def record_play(ad_id: str, session_id: str, caller_id: Optional[str]):
     fire_billing_webhook(record)
 
 
+def pick_ad_script(ad: Dict[str, Any], session: Session) -> str:
+    """Choose the best script for this ad based on conversation keywords.
+    If the ad has variants, pick the variant whose keywords best match recent
+    speech; otherwise fall back to the ad's base script."""
+    variants = ad.get("variants") or []
+    if not variants:
+        return ad["script"]
+    texts = " ".join(m.get("text", "") for m in session.transcript[-6:]).lower()
+    best_script = ad["script"]
+    best_hits = 0
+    for v in variants:
+        kws = v.get("keywords", []) or []
+        hits = sum(1 for kw in kws if kw.lower() in texts)
+        if hits > best_hits:
+            best_hits = hits
+            best_script = v.get("script") or ad["script"]
+    return best_script
+
+
 def maybe_inject_ad(session: Session) -> Optional[str]:
     ad = select_ad(session)
     if ad:
         session.ads_played.append(ad["id"])
         session.last_ad_at = time.time()
         record_play(ad["id"], session.session_id, session.caller_id)
-        return ad["script"]
+        return pick_ad_script(ad, session)
     return None
 
 
@@ -597,6 +629,9 @@ LLM_MODEL = os.environ.get("LLM_MODEL", "meta-llama/Meta-Llama-3.1-8B-Instruct-T
 
 TTS_PROVIDER = os.environ.get("TTS_PROVIDER", "cartesia")  # cartesia | elevenlabs | openai | deepgram
 SERPER_API_KEY = os.environ.get("SERPER_API_KEY", "")  # serper.dev — Google results for accurate phone/address lookups
+TELNYX_API_KEY = os.environ.get("TELNYX_API_KEY", "")  # needed to hang up calls server-side
+# Hang up if the caller is silent for this many seconds while the agent is just listening.
+SILENCE_HANGUP_SEC = float(os.environ.get("SILENCE_HANGUP_SEC", "10"))
 CARTESIA_API_KEY = os.environ.get("CARTESIA_API_KEY", "")
 CARTESIA_VOICE = os.environ.get("CARTESIA_VOICE", "")  # empty => auto-resolve from account
 CARTESIA_MODEL = os.environ.get("CARTESIA_MODEL", "sonic-2")
@@ -639,6 +674,22 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 OPENAI_TTS_VOICE = os.environ.get("OPENAI_TTS_VOICE", "nova")
 
 http = httpx.Client(timeout=30)
+
+
+async def telnyx_hangup(call_control_id: str):
+    """Hang up a Telnyx call via the Call Control API."""
+    if not (TELNYX_API_KEY and call_control_id):
+        return
+    try:
+        r = await asyncio.to_thread(
+            http.post,
+            f"https://api.telnyx.com/v2/calls/{call_control_id}/actions/hangup",
+            headers={"Authorization": f"Bearer {TELNYX_API_KEY}", "Content-Type": "application/json"},
+            json={},
+        )
+        log.info(f"[telnyx] hangup requested cc={call_control_id[:18]} status={r.status_code}")
+    except Exception as exc:
+        log.warning(f"[telnyx] hangup failed: {exc}")
 
 
 _LOOKUP_TRIGGERS = (
@@ -943,17 +994,50 @@ async def telnyx_websocket_endpoint(websocket: WebSocket):
             outbound_buffer.extend(chunk)
         if not outbound_buffer:
             return
-        frame = 160
-        for i in range(0, len(outbound_buffer), frame):
-            payload = bytes(outbound_buffer[i:i + frame])
-            b64 = _b64.b64encode(payload).decode("ascii")
-            await websocket.send_text(json.dumps({
-                "event": "media",
-                "stream_id": stream_id,
-                "media": {"payload": b64},
-            }))
-            # pace slightly so Telnyx's jitter buffer plays smoothly
-            await asyncio.sleep(0.018)
+        session.is_speaking = True
+        try:
+            frame = 160
+            for i in range(0, len(outbound_buffer), frame):
+                payload = bytes(outbound_buffer[i:i + frame])
+                b64 = _b64.b64encode(payload).decode("ascii")
+                await websocket.send_text(json.dumps({
+                    "event": "media",
+                    "stream_id": stream_id,
+                    "media": {"payload": b64},
+                }))
+                # pace slightly so Telnyx's jitter buffer plays smoothly
+                await asyncio.sleep(0.018)
+        finally:
+            session.is_speaking = False
+            # Reset the silence clock so the caller gets the full window to respond
+            # AFTER the agent finishes speaking — not counted from before.
+            session.last_heard_at = time.time()
+
+    async def _silence_watchdog():
+        """Hang up if the caller is silent for SILENCE_HANGUP_SEC while the agent
+        is idle (not speaking, not processing). Gives them the full window to reply."""
+        if SILENCE_HANGUP_SEC <= 0:
+            return
+        try:
+            while not session.hung_up:
+                await asyncio.sleep(1.0)
+                if awaiting_start or not session.last_heard_at:
+                    continue
+                if session.is_speaking or session.is_processing:
+                    continue
+                idle = time.time() - session.last_heard_at
+                if idle >= SILENCE_HANGUP_SEC:
+                    log.info(f"[telnyx] silence {idle:.0f}s — hanging up session={session_id}")
+                    session.hung_up = True
+                    if session.call_control_id:
+                        await telnyx_hangup(session.call_control_id)
+                    try:
+                        await websocket.close()
+                    except Exception:
+                        pass
+                    return
+        except Exception as exc:
+            log.warning(f"[telnyx] watchdog error: {exc}")
 
     try:
         while True:
@@ -972,6 +1056,8 @@ async def telnyx_websocket_endpoint(websocket: WebSocket):
                     call_control_id = msg.get("call_control_id") or msg.get("start", {}).get("call_control_id")
                     caller_num = msg.get("from") or msg.get("start", {}).get("from")
                     session.caller_id = caller_num or ""
+                    session.call_control_id = call_control_id
+                    session.last_heard_at = time.time()
                     session.segment = SEGMENT_TAGS.get(session.caller_id, [])
                     mf = msg.get("start", {}).get("media_format", {})
                     encoding = mf.get("encoding", "PCMU")
@@ -983,6 +1069,8 @@ async def telnyx_websocket_endpoint(websocket: WebSocket):
                         f"call_control_id={call_control_id} caller={caller_num} "
                         f"encoding={encoding} rate={sample_rate}"
                     )
+                    # Start the silence watchdog (hangs up after N seconds idle).
+                    asyncio.create_task(_silence_watchdog())
                     # Greet the caller immediately so the call doesn't open silent.
                     greeting = os.environ.get(
                         "GREETING",
@@ -1175,6 +1263,7 @@ async def process_speech(chunk: bytes, session: Session, ws: WebSocket, stream_s
 
     if rms >= SILENCE_RMS:
         session.last_voice_at = now
+        session.last_heard_at = now
         session.in_speech = True
         return
 
@@ -1253,6 +1342,11 @@ async def send_tts(ws: WebSocket, stream_sid: str, text: str):
 
 # ─── ADMIN API ─────────────────────────────────────────────────────────────────
 
+class AdVariant(BaseModel):
+    keywords: List[str] = []
+    script: str = ""
+
+
 class AdPayload(BaseModel):
     sponsor: str
     industry: str
@@ -1261,6 +1355,20 @@ class AdPayload(BaseModel):
     bid_cpm: float
     daily_cap: int = 100
     weight: float = 1.0
+    variants: List[AdVariant] = []
+
+
+class AdEdit(BaseModel):
+    """All fields optional — only provided fields are updated."""
+    sponsor: Optional[str] = None
+    industry: Optional[str] = None
+    keywords: Optional[List[str]] = None
+    script: Optional[str] = None
+    bid_cpm: Optional[float] = None
+    daily_cap: Optional[int] = None
+    weight: Optional[float] = None
+    active: Optional[bool] = None
+    variants: Optional[List[AdVariant]] = None
 
 
 @app.post("/admin/ads")
@@ -1270,11 +1378,26 @@ async def create_ad(payload: AdPayload, x_admin_token: Optional[str] = Header(de
     new_ad = {
         "id": ad_id,
         **payload.model_dump(),
+        "cta": "",
         "active": True,
     }
     AD_DB.append(new_ad)
     db_save_ad(new_ad)
     return {"ok": True, "ad": new_ad}
+
+
+@app.put("/admin/ads/{ad_id}")
+@app.patch("/admin/ads/{ad_id}")
+async def edit_ad(ad_id: str, payload: AdEdit, x_admin_token: Optional[str] = Header(default=None)):
+    """Edit any field of an existing ad, including keyword-specific variants."""
+    check_admin(x_admin_token)
+    ad = next((a for a in AD_DB if a["id"] == ad_id), None)
+    if not ad:
+        raise HTTPException(404, "Ad not found")
+    updates = payload.model_dump(exclude_none=True)
+    ad.update(updates)
+    db_save_ad(ad)
+    return {"ok": True, "ad": ad}
 
 
 @app.post("/admin/ads/{ad_id}/toggle")
@@ -1311,6 +1434,11 @@ async def admin_stats(x_admin_token: Optional[str] = Header(default=None)):
             "industry": ad["industry"],
             "active": ad.get("active", True),
             "bid_cpm": ad["bid_cpm"],
+            "daily_cap": ad.get("daily_cap", 100),
+            "weight": ad.get("weight", 1.0),
+            "keywords": ad.get("keywords", []),
+            "script": ad.get("script", ""),
+            "variants": ad.get("variants", []),
             "plays": plays,
             "revenue_usd": round(plays * ad["bid_cpm"] / 1000.0, 4),
         })
@@ -1371,7 +1499,14 @@ label{display:block;font-size:12px;color:var(--mut);margin:10px 0 4px}
 .gate{max-width:380px;margin:80px auto;text-align:center}
 .muted{color:var(--mut);font-size:13px}
 .err{color:#f85149;font-size:13px;margin-top:8px;min-height:18px}
-.actions{display:flex;gap:8px}
+.actions{display:flex;gap:8px;flex-wrap:wrap}
+.modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:flex-start;justify-content:center;overflow:auto;z-index:50}
+.modal-bg.show{display:flex}
+.modal{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:22px;max-width:640px;width:92%;margin:48px 0}
+.modal h3{margin:0 0 4px;font-size:17px}
+.variant{border:1px solid var(--line);border-radius:10px;padding:12px;margin-top:10px;position:relative}
+.variant .vrm{position:absolute;top:8px;right:8px}
+.small{font-size:12px;padding:5px 10px}
 </style></head><body>
 <div id="gate" class="gate">
   <h1>🔐 Ad Dashboard</h1>
@@ -1394,7 +1529,7 @@ label{display:block;font-size:12px;color:var(--mut);margin:10px 0 4px}
 
   <h2>Ads — times heard &amp; revenue</h2>
   <table id="adtbl"><thead><tr>
-    <th>Sponsor</th><th>Industry</th><th>Status</th><th>Times Heard</th><th>CPM</th><th>Revenue</th><th></th>
+    <th>Sponsor</th><th>Industry</th><th>Status</th><th>Times Heard</th><th>CPM</th><th>Revenue</th><th>Variants</th><th></th>
   </tr></thead><tbody></tbody></table>
 
   <h2>Add a new ad</h2>
@@ -1419,14 +1554,46 @@ label{display:block;font-size:12px;color:var(--mut);margin:10px 0 4px}
 </div>
 </div>
 
+<!-- Edit modal -->
+<div id="modalbg" class="modal-bg" onclick="if(event.target===this)closeEdit()">
+  <div class="modal">
+    <h3>Edit ad</h3>
+    <div class="muted" id="e_id" style="margin-bottom:8px"></div>
+    <div class="row">
+      <div><label>Sponsor</label><input id="e_sponsor"></div>
+      <div><label>Industry</label><input id="e_industry"></div>
+    </div>
+    <label>Default keywords (comma-separated)</label>
+    <input id="e_keywords">
+    <label>Default script</label>
+    <textarea id="e_script" rows="2"></textarea>
+    <div class="row">
+      <div><label>Bid CPM</label><input id="e_cpm" type="number" step="0.5"></div>
+      <div><label>Daily cap</label><input id="e_cap" type="number"></div>
+    </div>
+
+    <h2 style="margin-top:18px">Keyword variants <span class="muted" style="text-transform:none">— different scripts for different keywords</span></h2>
+    <div class="muted" style="margin-bottom:6px">When the caller's words match a variant's keywords, that script plays instead of the default.</div>
+    <div id="e_variants"></div>
+    <button class="ghost small" style="margin-top:8px" onclick="addVariantRow()">+ Add variant</button>
+
+    <div style="margin-top:18px;display:flex;gap:10px;align-items:center">
+      <button onclick="saveEdit()">Save changes</button>
+      <button class="ghost" onclick="closeEdit()">Cancel</button>
+      <span id="eerr" class="err"></span>
+    </div>
+  </div>
+</div>
+
 <script>
 let TOK = sessionStorage.getItem("adm_tok") || "";
+let ADS = {};  // id -> ad object, cached from last load
 function hdr(){return {"X-Admin-Token":TOK,"Content-Type":"application/json"};}
 async function api(path,opts){opts=opts||{};opts.headers=hdr();const r=await fetch(path,opts);if(r.status===401)throw new Error("Unauthorized");if(!r.ok)throw new Error("HTTP "+r.status);return r.json();}
 function login(){TOK=document.getElementById("tok").value.trim();sessionStorage.setItem("adm_tok",TOK);load();}
 function logout(){TOK="";sessionStorage.removeItem("adm_tok");document.getElementById("app").style.display="none";document.getElementById("gate").style.display="block";}
 function money(n){return "$"+Number(n).toFixed(n<1?4:2);}
-function esc(s){return (s==null?"":String(s)).replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));}
+function esc(s){return (s==null?"":String(s)).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\\"":"&quot;"}[c]));}
 async function load(){
   try{
     const d=await api("/admin/stats");
@@ -1441,14 +1608,18 @@ async function load(){
       ["Live calls",t.sessions_active],
       ["Impressions",t.impressions_logged],
     ].map(([k,v])=>`<div class='card'><div class='k'>${k}</div><div class='v'>${v}</div></div>`).join("");
+    ADS={};
+    d.ads.forEach(a=>ADS[a.id]=a);
     document.querySelector("#adtbl tbody").innerHTML=d.ads.map(a=>`<tr>
       <td>${esc(a.sponsor)}</td><td>${esc(a.industry)}</td>
       <td><span class='pill ${a.active?"on":"off"}'>${a.active?"Active":"Paused"}</span></td>
       <td><b>${a.plays}</b></td><td>${money(a.bid_cpm)}</td><td class='good'>${money(a.revenue_usd)}</td>
+      <td>${(a.variants&&a.variants.length)?a.variants.length:"—"}</td>
       <td class='actions'>
-        <button class='ghost' onclick="toggleAd('${a.id}')">${a.active?"Pause":"Resume"}</button>
-        <button class='danger' onclick="delAd('${a.id}')">Delete</button>
-      </td></tr>`).join("") || "<tr><td colspan=7 class='muted'>No ads yet.</td></tr>";
+        <button class='ghost small' onclick="openEdit('${a.id}')">Edit</button>
+        <button class='ghost small' onclick="toggleAd('${a.id}')">${a.active?"Pause":"Resume"}</button>
+        <button class='danger small' onclick="delAd('${a.id}')">Delete</button>
+      </td></tr>`).join("") || "<tr><td colspan=8 class='muted'>No ads yet.</td></tr>";
     document.querySelector("#imptbl tbody").innerHTML=(d.recent_impressions||[]).map(i=>`<tr>
       <td class='muted'>${new Date(i.ts*1000).toLocaleString()}</td>
       <td>${esc(i.sponsor)}</td><td>${esc(i.caller_id||"—")}</td><td class='good'>${money(i.revenue_usd)}</td>
@@ -1474,6 +1645,56 @@ async function addAd(){
     ["f_sponsor","f_industry","f_keywords","f_script"].forEach(i=>document.getElementById(i).value="");
     document.getElementById("aerr").textContent="";load();
   }catch(e){document.getElementById("aerr").textContent=e.message;}
+}
+
+// ---- Edit modal + variants ----
+let EDIT_ID=null;
+function variantRowHTML(kw,script){
+  return `<div class="variant">
+    <button class="danger small vrm" onclick="this.parentNode.remove()">✕</button>
+    <label>Trigger keywords (comma-separated)</label>
+    <input class="v_kw" value="${esc((kw||[]).join(', '))}">
+    <label>Script for these keywords</label>
+    <textarea class="v_script" rows="2">${esc(script||"")}</textarea>
+  </div>`;
+}
+function addVariantRow(kw,script){
+  document.getElementById("e_variants").insertAdjacentHTML("beforeend",variantRowHTML(kw,script));
+}
+function openEdit(id){
+  const a=ADS[id]; if(!a)return;
+  EDIT_ID=id;
+  document.getElementById("e_id").textContent="ID: "+id;
+  document.getElementById("e_sponsor").value=a.sponsor||"";
+  document.getElementById("e_industry").value=a.industry||"";
+  document.getElementById("e_keywords").value=(a.keywords||[]).join(", ");
+  document.getElementById("e_script").value=a.script||"";
+  document.getElementById("e_cpm").value=a.bid_cpm||0;
+  document.getElementById("e_cap").value=a.daily_cap||500;
+  document.getElementById("e_variants").innerHTML="";
+  (a.variants||[]).forEach(v=>addVariantRow(v.keywords,v.script));
+  document.getElementById("eerr").textContent="";
+  document.getElementById("modalbg").classList.add("show");
+}
+function closeEdit(){document.getElementById("modalbg").classList.remove("show");EDIT_ID=null;}
+async function saveEdit(){
+  if(!EDIT_ID)return;
+  const variants=[...document.querySelectorAll("#e_variants .variant")].map(v=>({
+    keywords:v.querySelector(".v_kw").value.split(",").map(s=>s.trim()).filter(Boolean),
+    script:v.querySelector(".v_script").value.trim(),
+  })).filter(v=>v.script);
+  const body={
+    sponsor:document.getElementById("e_sponsor").value.trim(),
+    industry:document.getElementById("e_industry").value.trim(),
+    keywords:document.getElementById("e_keywords").value.split(",").map(s=>s.trim()).filter(Boolean),
+    script:document.getElementById("e_script").value.trim(),
+    bid_cpm:parseFloat(document.getElementById("e_cpm").value)||0,
+    daily_cap:parseInt(document.getElementById("e_cap").value)||500,
+    variants:variants,
+  };
+  try{await api("/admin/ads/"+EDIT_ID,{method:"PUT",body:JSON.stringify(body)});
+    closeEdit();load();
+  }catch(e){document.getElementById("eerr").textContent=e.message;}
 }
 if(TOK) load();
 </script>
