@@ -19,8 +19,8 @@ from dataclasses import dataclass, field, asdict
 from typing import Optional, List, Dict, Any
 from collections import defaultdict
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
-from fastapi.responses import PlainTextResponse, JSONResponse
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Header
+from fastapi.responses import PlainTextResponse, JSONResponse, HTMLResponse
 from pydantic import BaseModel
 
 import httpx as _http
@@ -133,6 +133,18 @@ SEGMENT_TAGS: Dict[str, List[str]] = {}
 play_counts: Dict[str, int] = defaultdict(int)
 total_revenue: float = 0.0
 impression_log: List[Dict[str, Any]] = []
+
+# Admin dashboard auth — set ADMIN_TOKEN in Render to a long random string.
+ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
+
+
+def check_admin(token: Optional[str]):
+    """Raise 401 unless the provided token matches ADMIN_TOKEN.
+    If ADMIN_TOKEN is unset, admin endpoints are locked (deny-by-default)."""
+    if not ADMIN_TOKEN:
+        raise HTTPException(503, "Admin disabled: set ADMIN_TOKEN env var")
+    if not token or not hmac.compare_digest(token, ADMIN_TOKEN):
+        raise HTTPException(401, "Unauthorized")
 
 
 # ─── BILLING WEBHOOK / AD-SERVER INTEGRATION ──────────────────────────────────
@@ -716,7 +728,8 @@ async def health():
 
 
 @app.get("/admin/ads")
-async def list_ads():
+async def list_ads(x_admin_token: Optional[str] = Header(default=None)):
+    check_admin(x_admin_token)
     return {
         "ads": AD_DB,
         "play_counts": dict(play_counts),
@@ -1116,7 +1129,8 @@ class AdPayload(BaseModel):
 
 
 @app.post("/admin/ads")
-async def create_ad(payload: AdPayload):
+async def create_ad(payload: AdPayload, x_admin_token: Optional[str] = Header(default=None)):
+    check_admin(x_admin_token)
     ad_id = f"ad_{uuid.uuid4().hex[:6]}"
     new_ad = {
         "id": ad_id,
@@ -1128,7 +1142,8 @@ async def create_ad(payload: AdPayload):
 
 
 @app.post("/admin/ads/{ad_id}/toggle")
-async def toggle_ad(ad_id: str):
+async def toggle_ad(ad_id: str, x_admin_token: Optional[str] = Header(default=None)):
+    check_admin(x_admin_token)
     ad = next((a for a in AD_DB if a["id"] == ad_id), None)
     if not ad:
         raise HTTPException(404, "Ad not found")
@@ -1137,11 +1152,194 @@ async def toggle_ad(ad_id: str):
 
 
 @app.delete("/admin/ads/{ad_id}")
-async def delete_ad(ad_id: str):
+async def delete_ad(ad_id: str, x_admin_token: Optional[str] = Header(default=None)):
+    check_admin(x_admin_token)
     global AD_DB
     AD_DB = [a for a in AD_DB if a["id"] != ad_id]
     play_counts.pop(ad_id, None)
     return {"ok": True}
+
+
+@app.get("/admin/stats")
+async def admin_stats(x_admin_token: Optional[str] = Header(default=None)):
+    """Per-ad analytics: how many times each ad was heard + revenue + recent plays."""
+    check_admin(x_admin_token)
+    per_ad = []
+    for ad in AD_DB:
+        plays = play_counts.get(ad["id"], 0)
+        per_ad.append({
+            "id": ad["id"],
+            "sponsor": ad["sponsor"],
+            "industry": ad["industry"],
+            "active": ad.get("active", True),
+            "bid_cpm": ad["bid_cpm"],
+            "plays": plays,
+            "revenue_usd": round(plays * ad["bid_cpm"] / 1000.0, 4),
+        })
+    per_ad.sort(key=lambda x: x["plays"], reverse=True)
+    return {
+        "totals": {
+            "total_plays": sum(play_counts.values()),
+            "total_revenue_usd": round(total_revenue, 4),
+            "active_ads": sum(1 for a in AD_DB if a.get("active", True)),
+            "total_ads": len(AD_DB),
+            "sessions_active": len(sessions),
+            "impressions_logged": len(impression_log),
+        },
+        "ads": per_ad,
+        "recent_impressions": list(reversed(impression_log[-25:])),
+    }
+
+
+@app.get("/admin", response_class=HTMLResponse)
+@app.get("/admin/", response_class=HTMLResponse)
+async def admin_dashboard():
+    """Single-page dashboard. Prompts for the admin token, then renders live
+    stats and an ad editor. The token is sent as the X-Admin-Token header on
+    every API call (never embedded in the served HTML)."""
+    return HTMLResponse(ADMIN_HTML)
+
+
+ADMIN_HTML = """<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AI Voice Agent — Ad Dashboard</title>
+<style>
+:root{--bg:#0b0e14;--card:#151a23;--line:#222b3a;--txt:#e6edf3;--mut:#8b98a9;--acc:#4f9cf9;--good:#3fb950;--warn:#d29922;}
+*{box-sizing:border-box}body{margin:0;font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--txt)}
+header{padding:18px 24px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+h1{font-size:18px;margin:0;font-weight:600}
+.wrap{padding:24px;max-width:1100px;margin:0 auto}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:14px;margin-bottom:24px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px}
+.card .k{color:var(--mut);font-size:12px;text-transform:uppercase;letter-spacing:.04em}
+.card .v{font-size:26px;font-weight:700;margin-top:6px}
+.card .v.good{color:var(--good)}
+table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+th,td{padding:11px 14px;text-align:left;border-bottom:1px solid var(--line);font-size:14px}
+th{color:var(--mut);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.04em}
+tr:last-child td{border-bottom:none}
+.pill{display:inline-block;padding:2px 9px;border-radius:99px;font-size:12px;font-weight:600}
+.pill.on{background:rgba(63,185,80,.15);color:var(--good)}
+.pill.off{background:rgba(210,153,34,.15);color:var(--warn)}
+button{background:var(--acc);color:#fff;border:0;border-radius:8px;padding:8px 14px;font-weight:600;cursor:pointer;font-size:14px}
+button.ghost{background:transparent;border:1px solid var(--line);color:var(--txt)}
+button.danger{background:transparent;border:1px solid #5a2330;color:#f85149}
+button:hover{opacity:.9}
+h2{font-size:15px;margin:28px 0 12px;color:var(--mut);text-transform:uppercase;letter-spacing:.04em}
+input,textarea{width:100%;background:#0d1117;border:1px solid var(--line);border-radius:8px;color:var(--txt);padding:9px 11px;font:inherit}
+label{display:block;font-size:12px;color:var(--mut);margin:10px 0 4px}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.gate{max-width:380px;margin:80px auto;text-align:center}
+.muted{color:var(--mut);font-size:13px}
+.err{color:#f85149;font-size:13px;margin-top:8px;min-height:18px}
+.actions{display:flex;gap:8px}
+</style></head><body>
+<div id="gate" class="gate">
+  <h1>🔐 Ad Dashboard</h1>
+  <p class="muted">Enter your admin token to continue.</p>
+  <input id="tok" type="password" placeholder="ADMIN_TOKEN" autofocus>
+  <div style="margin-top:12px"><button onclick="login()">Unlock</button></div>
+  <div id="gerr" class="err"></div>
+</div>
+
+<div id="app" style="display:none">
+<header>
+  <h1>📞 AI Voice Agent</h1>
+  <span class="muted" id="sub">Ad performance dashboard</span>
+  <span style="flex:1"></span>
+  <button class="ghost" onclick="load()">↻ Refresh</button>
+  <button class="ghost" onclick="logout()">Lock</button>
+</header>
+<div class="wrap">
+  <div class="cards" id="cards"></div>
+
+  <h2>Ads — times heard &amp; revenue</h2>
+  <table id="adtbl"><thead><tr>
+    <th>Sponsor</th><th>Industry</th><th>Status</th><th>Times Heard</th><th>CPM</th><th>Revenue</th><th></th>
+  </tr></thead><tbody></tbody></table>
+
+  <h2>Add a new ad</h2>
+  <div class="card">
+    <div class="row">
+      <div><label>Sponsor name</label><input id="f_sponsor" placeholder="Acme Co."></div>
+      <div><label>Industry</label><input id="f_industry" placeholder="technology / health / travel / legal / home_services"></div>
+    </div>
+    <label>Keywords (comma-separated — trigger the ad when caller mentions these)</label>
+    <input id="f_keywords" placeholder="software, app, cloud, automation">
+    <label>Script (what the agent says aloud — spell URLs like 'acme dot com')</label>
+    <textarea id="f_script" rows="2" placeholder="Quick tip from Acme: ..."></textarea>
+    <div class="row">
+      <div><label>Bid CPM (USD per 1000 plays)</label><input id="f_cpm" type="number" value="10.0" step="0.5"></div>
+      <div><label>Daily cap (max plays/day)</label><input id="f_cap" type="number" value="500"></div>
+    </div>
+    <div style="margin-top:14px"><button onclick="addAd()">+ Create Ad</button> <span id="aerr" class="err"></span></div>
+  </div>
+
+  <h2>Recent plays</h2>
+  <table id="imptbl"><thead><tr><th>When</th><th>Sponsor</th><th>Caller</th><th>Revenue</th></tr></thead><tbody></tbody></table>
+</div>
+</div>
+
+<script>
+let TOK = sessionStorage.getItem("adm_tok") || "";
+function hdr(){return {"X-Admin-Token":TOK,"Content-Type":"application/json"};}
+async function api(path,opts){opts=opts||{};opts.headers=hdr();const r=await fetch(path,opts);if(r.status===401)throw new Error("Unauthorized");if(!r.ok)throw new Error("HTTP "+r.status);return r.json();}
+function login(){TOK=document.getElementById("tok").value.trim();sessionStorage.setItem("adm_tok",TOK);load();}
+function logout(){TOK="";sessionStorage.removeItem("adm_tok");document.getElementById("app").style.display="none";document.getElementById("gate").style.display="block";}
+function money(n){return "$"+Number(n).toFixed(n<1?4:2);}
+function esc(s){return (s==null?"":String(s)).replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));}
+async function load(){
+  try{
+    const d=await api("/admin/stats");
+    document.getElementById("gate").style.display="none";
+    document.getElementById("app").style.display="block";
+    document.getElementById("gerr").textContent="";
+    const t=d.totals;
+    document.getElementById("cards").innerHTML=[
+      ["Total plays",t.total_plays],
+      ["Revenue (run)","<span class='good'>"+money(t.total_revenue_usd)+"</span>"],
+      ["Active ads",t.active_ads+" / "+t.total_ads],
+      ["Live calls",t.sessions_active],
+      ["Impressions",t.impressions_logged],
+    ].map(([k,v])=>`<div class='card'><div class='k'>${k}</div><div class='v'>${v}</div></div>`).join("");
+    document.querySelector("#adtbl tbody").innerHTML=d.ads.map(a=>`<tr>
+      <td>${esc(a.sponsor)}</td><td>${esc(a.industry)}</td>
+      <td><span class='pill ${a.active?"on":"off"}'>${a.active?"Active":"Paused"}</span></td>
+      <td><b>${a.plays}</b></td><td>${money(a.bid_cpm)}</td><td class='good'>${money(a.revenue_usd)}</td>
+      <td class='actions'>
+        <button class='ghost' onclick="toggleAd('${a.id}')">${a.active?"Pause":"Resume"}</button>
+        <button class='danger' onclick="delAd('${a.id}')">Delete</button>
+      </td></tr>`).join("") || "<tr><td colspan=7 class='muted'>No ads yet.</td></tr>";
+    document.querySelector("#imptbl tbody").innerHTML=(d.recent_impressions||[]).map(i=>`<tr>
+      <td class='muted'>${new Date(i.ts*1000).toLocaleString()}</td>
+      <td>${esc(i.sponsor)}</td><td>${esc(i.caller_id||"—")}</td><td class='good'>${money(i.revenue_usd)}</td>
+      </tr>`).join("") || "<tr><td colspan=4 class='muted'>No plays yet.</td></tr>";
+  }catch(e){
+    if(e.message==="Unauthorized"){document.getElementById("gerr").textContent="Wrong token.";logout();}
+    else document.getElementById("gerr").textContent=e.message;
+  }
+}
+async function toggleAd(id){await api("/admin/ads/"+id+"/toggle",{method:"POST"});load();}
+async function delAd(id){if(confirm("Delete this ad?")){await api("/admin/ads/"+id,{method:"DELETE"});load();}}
+async function addAd(){
+  const body={
+    sponsor:document.getElementById("f_sponsor").value.trim(),
+    industry:document.getElementById("f_industry").value.trim(),
+    keywords:document.getElementById("f_keywords").value.split(",").map(s=>s.trim()).filter(Boolean),
+    script:document.getElementById("f_script").value.trim(),
+    bid_cpm:parseFloat(document.getElementById("f_cpm").value)||0,
+    daily_cap:parseInt(document.getElementById("f_cap").value)||500,
+  };
+  if(!body.sponsor||!body.script){document.getElementById("aerr").textContent="Sponsor and script required.";return;}
+  try{await api("/admin/ads",{method:"POST",body:JSON.stringify(body)});
+    ["f_sponsor","f_industry","f_keywords","f_script"].forEach(i=>document.getElementById(i).value="");
+    document.getElementById("aerr").textContent="";load();
+  }catch(e){document.getElementById("aerr").textContent=e.message;}
+}
+if(TOK) load();
+</script>
+</body></html>"""
 
 
 if __name__ == "__main__":
