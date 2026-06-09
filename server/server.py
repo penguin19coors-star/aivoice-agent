@@ -1,4 +1,5 @@
 """
+from __future__ import annotations
 AI Voice Agent Server for paid ad-supported phone calls.
 Routes: Twilio Voice → WebSocket → [Deepgram STT] → [LLM + Ad Matching] → [TTS] → Twilio
 """
@@ -706,18 +707,45 @@ async def telnyx_hangup(call_control_id: str):
 # Improved web search trigger logic (cheap heuristics, no extra LLM cost).
 # We only pay for Serper on questions that actually need current data.
 MUST_SEARCH = [
-    "phone number", "number for", "address for", "hours for", "open today",
+    "phone number", "number for", "address for", "hours for", "open today", "is .* open",
     "directions to", "near me", "closest", "nearest",
-    "weather", "forecast", "temperature", "raining", "stock", "stocks",
-    "stock price", "score", "scores", "who won", "game today", "live score",
-    "news", "latest news", "breaking", "what happened",
-    "current price", "how much does", "price of", "in stock", "where to buy",
-    "part number", "specs for",
+    "weather", "forecast", "temperature", "raining", "snow", "stock", "stocks",
+    "stock price", "score", "scores", "who won", "game today", "live score", "how are the .* doing",
+    "news", "latest news", "breaking", "what happened", "update on",
+    "current price", "how much does", "price of", "in stock", "where to buy", "cost of",
+    "part number", "specs for", "tell me about the", "latest on",
 ]
 HISTORICAL_SKIP = ["who was", "when did", "what was", "in 17", "in 18", "in 19", "in 20",
                    "died in", "lived in", "built in", "abraham lincoln", "george washington",
                    "ancient", "history of", "last century"]
 CURRENT_MARKERS = ["today", "right now", "currently", "latest", "this week", "live", "as of now"]
+
+def _refine_search_query(user_text: str, transcript=None) -> str:
+    """Turn a spoken query into a better Google search string.
+    Uses recent conversation context for follow-ups (e.g. "their hours?" after mentioning a business).
+    This dramatically improves result quality without extra cost.
+    """
+    q = user_text.strip()
+    if not transcript:
+        return q[:180]
+
+    # Grab last 1-2 user turns for context
+    recent = []
+    for m in transcript[-3:]:
+        if m.get("role") == "user":
+            recent.append(m.get("text", ""))
+    if not recent:
+        return q[:180]
+
+    context = " ".join(recent[-2:])[-160:]
+    # Simple heuristic: if the current question is short/follow-up like, prepend context
+    short_followups = ("their ", "its ", "the ", "that ", "those ", "what about", "how about", "and the", "also")
+    if len(q) < 45 or any(q.lower().startswith(s) for s in short_followups):
+        combined = f"{context} {q}".strip()
+        # Avoid repeating the same business name
+        return combined[:220]
+    return q[:180]
+
 
 def needs_web_lookup(text: str, transcript=None):
     """Smart trigger: search only for things that need fresh data.
@@ -779,18 +807,24 @@ def needs_web_lookup(text: str, transcript=None):
             return True
     return False
 
-async def web_lookup(query: str) -> str:
-    """Query Serper.dev (Google) and return clean factual text the LLM can read
-    aloud. Prioritises the knowledge graph (verified business phone/address/hours),
-    then answer box, then top organic results. Returns '' if unavailable."""
+async def web_lookup(user_text: str, transcript=None) -> str:
+    """Query Serper.dev (Google) and return clean factual text the LLM can read aloud.
+    Uses a refined search query built from user_text + recent transcript context for much better results on follow-ups.
+    Prioritises knowledge graph (phone/address/hours), answer box, places, then organic.
+    """
     if not SERPER_API_KEY:
         return ""
+
+    # Build a much better search query using context
+    search_q = _refine_search_query(user_text, transcript)
+    log.info(f"[serper] refined query: {search_q[:80]!r}")
+
     try:
         r = await asyncio.to_thread(
             http.post,
             "https://google.serper.dev/search",
             headers={"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"},
-            json={"q": query, "num": 5},
+            json={"q": search_q, "num": 8},
         )
     except Exception as exc:
         log.warning(f"[serper] request failed: {exc}")
@@ -855,7 +889,10 @@ async def web_lookup(query: str) -> str:
                 parts.append(seg)
 
     result = "\n".join(p for p in parts if p).strip()
-    return result[:1200]
+    if not result:
+        return ""
+    # Add a small header so the LLM knows this came from live search
+    return f"Live search results for: {search_q}\n{result}"[:1400]
 
 
 async def call_llm(session: Session, user_text: str) -> tuple:
@@ -867,20 +904,21 @@ async def call_llm(session: Session, user_text: str) -> tuple:
     # Live web lookup for factual questions (phone, address, hours, weather…).
     facts = ""
     if needs_web_lookup(user_text, session.transcript):
-        facts = await web_lookup(user_text)
+        facts = await web_lookup(user_text, session.transcript)
         if facts:
             log.info(f"[serper] facts for '{user_text[:40]}': {facts[:120]!r}")
             messages.append({
                 "role": "system",
-                "content": (
-                    "SEARCH RESULTS (use these EXACTLY — do not invent anything):\n"
-                    + facts + "\n\n"
-                    + "STRICT RULES FOR THIS RESPONSE:\n"
-                    + "- Use ONLY the exact facts above. Never add, guess, or invent any phone number, address, hours, zip code, or contact detail that is not written verbatim in the search results.\n"
-                    + "- If the caller asked for a phone number, address, or hours and it is NOT explicitly in the results above, you MUST respond with something like: \"I don't have the exact phone number for that right now\" or \"I'm not finding the current address — is there another way I can help?\" Do not make one up.\n"
-                    + "- For spoken numbers, read them naturally only if they appear exactly in the results (example: 'six one four, five five five, zero one two three').\n"
-                    + "- It is far better to say you couldn't find it than to give wrong contact information."
-                ),
+                "content": f"""LIVE SEARCH RESULTS (from Google via Serper — use these exactly):
+{facts}
+
+HOW TO USE THESE RESULTS:
+- Base your answer ONLY on the facts above when they are relevant. Read phone numbers, addresses, hours, prices, and scores exactly as shown.
+- If the specific detail the caller wants (phone, address, current price, hours, score, etc.) is not in the results, say clearly that you couldn't find the exact/current information and offer to help another way or ask one short clarifying question (e.g. "Is that the one downtown or on Main Street?").
+- Never invent or guess numbers, addresses, or business details.
+- For non-contact facts (weather, news, general info), you can combine the search results with your general knowledge if it helps, but prioritize the live data.
+- Speak the information naturally. Example good response when data is missing: "I'm not finding the current phone number for that in my search — do you have the name of the specific location?"
+"""
             })
 
     # Hard safety: if we decided a web lookup was needed for contact info
@@ -888,13 +926,13 @@ async def call_llm(session: Session, user_text: str) -> tuple:
     if needs_web_lookup(user_text, session.transcript) and not facts:
         messages.append({
             "role": "system",
-            "content": (
-                "IMPORTANT: No verified search results were available for this query. "
-                "The caller is likely asking for a phone number, address, hours, or specific business contact. "
-                "You MUST NOT invent or guess any of those details. "
-                "Say clearly that you don't have the exact information right now and offer to help with something else. "
-                "Good responses: \"I don't have the current phone number for that\" or \"I'm not finding that address in my information — anything else I can help with?\""
-            )
+            "content": """IMPORTANT: A web search was attempted for this query but no useful verified results came back.
+This is likely a request for current phone, address, hours, price, score, or business info.
+You MUST NOT invent any of those details.
+Tell the caller honestly that you couldn't find the exact information right now.
+You may ask ONE short, helpful clarifying question to narrow it down (e.g. "Which location are you thinking of?" or "Do you have the city or street name?").
+Then offer to help with something else. Good example: "I'm not finding current details for that in my search. Which specific one are you looking for — the downtown spot or another location?"
+"""
         })
 
     payload = {
