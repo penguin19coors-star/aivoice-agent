@@ -587,7 +587,7 @@ async def twilio_voice_webhook():
     return PlainTextResponse(twiml, media_type="application/xml")
 
 
-@app.post("/telnyx/voice")
+@app.api_route("/telnyx/voice", methods=["GET", "POST"])
 async def telnyx_voice_webhook():
     """Return Telnyx TeXML that opens a bidirectional µ-law WebSocket stream."""
     ws_url = os.environ.get("PUBLIC_WSS_URL") or os.environ.get("PUBLIC_WS_URL", "wss://your-app.onrender.com")
