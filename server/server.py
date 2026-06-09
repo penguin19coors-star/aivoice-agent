@@ -689,17 +689,26 @@ http = httpx.Client(timeout=30)
 
 
 async def telnyx_hangup(call_control_id: str):
-    """Hang up a Telnyx call via the Call Control API."""
+    """Hang up a Telnyx call via the Call Control API.
+    Uses empty body; logs full response on non-success (common 422 means call
+    already ended or invalid state — not always fatal).
+    """
     if not (TELNYX_API_KEY and call_control_id):
         return
     try:
-        r = await asyncio.to_thread(
-            http.post,
-            f"https://api.telnyx.com/v2/calls/{call_control_id}/actions/hangup",
-            headers={"Authorization": f"Bearer {TELNYX_API_KEY}", "Content-Type": "application/json"},
-            json={},
-        )
-        log.info(f"[telnyx] hangup requested cc={call_control_id[:18]} status={r.status_code}")
+        def _do_hangup():
+            return http.post(
+                f"https://api.telnyx.com/v2/calls/{call_control_id}/actions/hangup",
+                headers={"Authorization": f"Bearer {TELNYX_API_KEY}", "Content-Type": "application/json"},
+                json={"client_state": "silence_timeout"},
+                timeout=10,
+            )
+        r = await asyncio.to_thread(_do_hangup)
+        if r.status_code in (200, 204):
+            log.info(f"[telnyx] hangup success cc={call_control_id[:18]}")
+        else:
+            # 422 is common if the call already ended naturally — not a hard failure
+            log.warning(f"[telnyx] hangup cc={call_control_id[:18]} status={r.status_code} body={r.text[:300]!r}")
     except Exception as exc:
         log.warning(f"[telnyx] hangup failed: {exc}")
 
@@ -1064,26 +1073,35 @@ async def twilio_voice_webhook():
 @app.api_route("/telnyx/voice", methods=["GET", "POST"])
 async def telnyx_voice_webhook():
     """Return Telnyx TeXML that opens a bidirectional µ-law WebSocket stream."""
-    ws_url = os.environ.get("PUBLIC_WSS_URL") or os.environ.get("PUBLIC_WS_URL", "wss://your-app.onrender.com")
-    # Force wss scheme for WebSocket
-    if ws_url.startswith("https://"):
-        ws_url = "wss://" + ws_url[len("https://"):]
-    # Normalize to the dedicated Telnyx WebSocket route /telnyx/ws
-    if ws_url.endswith("/telnyx/ws"):
-        pass
-    elif ws_url.endswith("/ws"):
-        ws_url = ws_url[: -len("/ws")].rstrip("/") + "/telnyx/ws"
-    else:
-        ws_url = ws_url.rstrip("/") + "/telnyx/ws"
+    try:
+        ws_url = os.environ.get("PUBLIC_WSS_URL") or os.environ.get("PUBLIC_WS_URL", "wss://your-app.onrender.com")
+        # Force wss scheme for WebSocket
+        if ws_url.startswith("https://"):
+            ws_url = "wss://" + ws_url[len("https://"):]
+        # Normalize to the dedicated Telnyx WebSocket route /telnyx/ws
+        if ws_url.endswith("/telnyx/ws"):
+            pass
+        elif ws_url.endswith("/ws"):
+            ws_url = ws_url[: -len("/ws")].rstrip("/") + "/telnyx/ws"
+        else:
+            ws_url = ws_url.rstrip("/") + "/telnyx/ws"
 
-    texml = f"""<?xml version="1.0" encoding="UTF-8"?>
+        texml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Connect>
     <Stream url="{ws_url}" bidirectionalMode="rtp" contentType="audio/x-mulaw;rate=8000" />
   </Connect>
   <Pause length="40"/>
 </Response>"""
-    return PlainTextResponse(texml, media_type="application/xml")
+        return PlainTextResponse(texml, media_type="application/xml")
+    except Exception as exc:
+        log.exception(f"[telnyx] error building voice webhook TeXML: {exc}")
+        # Return a minimal valid response so Telnyx doesn't get a giant HTML error page
+        fallback = """<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say voice="alice">Sorry, we're having trouble right now. Please try again later.</Say>
+</Response>"""
+        return PlainTextResponse(fallback, media_type="application/xml")
 
 
 @app.websocket("/telnyx/ws")
