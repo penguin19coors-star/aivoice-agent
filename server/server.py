@@ -405,16 +405,19 @@ def select_ad(session: Session) -> Optional[Dict[str, Any]]:
     This gives fine-grained control over ad density without hard-coding numbers.
     """
     now = time.time()
+    min_int = FREQUENCY.get("min_interval_seconds", 90)
+    max_ads = FREQUENCY.get("max_ads", 2)
+    window = FREQUENCY.get("window_seconds", 600)
 
     # 1. Enforce minimum spacing between ads in this call
-    if session.last_ad_at > 0 and (now - session.last_ad_at) < AD_MIN_INTERVAL_SECONDS:
+    if session.last_ad_at > 0 and (now - session.last_ad_at) < min_int:
         return None
 
     # 2. Enforce maximum ads in a rolling time window (based on call/phone time)
-    if AD_MAX_ADS > 0 and AD_WINDOW_SECONDS > 0:
-        window_start = now - AD_WINDOW_SECONDS
+    if max_ads > 0 and window > 0:
+        window_start = now - window
         recent_ads = [t for t in session.ad_play_times if t >= window_start]
-        if len(recent_ads) >= AD_MAX_ADS:
+        if len(recent_ads) >= max_ads:
             return None
 
     context = session.topic_extract or classify_industry(session.transcript)
@@ -444,7 +447,7 @@ def select_ad(session: Session) -> Optional[Dict[str, Any]]:
     log.info(
         f"[ad] selected {best['ad']['id']} sponsor={best['ad']['sponsor']} "
         f"score={best['score']:.2f} relevance={best['relevance']:.2f} "
-        f"(window_ads={len([t for t in session.ad_play_times if t >= now - AD_WINDOW_SECONDS])})"
+        f"(window_ads={len([t for t in session.ad_play_times if t >= now - window])})"
     )
     return best["ad"]
 
@@ -690,9 +693,13 @@ AD_BREAK_CUE = os.environ.get("AD_BREAK_CUE", "And now, a quick word from our sp
 
 # Ad frequency controls (per call / phone time)
 # These let you control how many ads are played relative to call duration.
-AD_MIN_INTERVAL_SECONDS = int(os.environ.get("AD_MIN_INTERVAL_SECONDS", "90"))
-AD_MAX_ADS = int(os.environ.get("AD_MAX_ADS", "2"))
-AD_WINDOW_SECONDS = int(os.environ.get("AD_WINDOW_SECONDS", "600"))  # e.g. 600 = 10 minutes
+# Runtime frequency settings (can be overridden from /admin dashboard)
+# Loaded from DB on startup, falling back to env vars
+FREQUENCY = {
+    "min_interval_seconds": int(os.environ.get("AD_MIN_INTERVAL_SECONDS", "90")),
+    "max_ads": int(os.environ.get("AD_MAX_ADS", "2")),
+    "window_seconds": int(os.environ.get("AD_WINDOW_SECONDS", "600")),
+}
 CARTESIA_MODEL = os.environ.get("CARTESIA_MODEL", "sonic-2")
 _resolved_voice: Optional[str] = None
 
@@ -1671,6 +1678,36 @@ async def admin_stats(x_admin_token: Optional[str] = Header(default=None)):
         "recent_impressions": list(reversed(impression_log[-25:])),
     }
 
+@app.get("/admin/settings")
+async def get_settings(x_admin_token: Optional[str] = Header(default=None)):
+    check_admin(x_admin_token)
+    return {
+        "frequency": dict(FREQUENCY),
+        "source": "db+env"
+    }
+
+@app.put("/admin/settings")
+async def update_settings(payload: dict, x_admin_token: Optional[str] = Header(default=None)):
+    check_admin(x_admin_token)
+    allowed = {"min_interval_seconds", "max_ads", "window_seconds"}
+    updated = {}
+    for k, v in payload.items():
+        if k in allowed:
+            try:
+                val = int(v)
+                db_save_setting(k, val)
+                updated[k] = val
+            except:
+                pass
+    # Reload into memory
+    global FREQUENCY_SETTINGS
+    FREQUENCY_SETTINGS = db_load_settings()
+    for k, v in FREQUENCY_SETTINGS.items():
+        if k in FREQUENCY:
+            FREQUENCY[k] = v
+    return {"updated": updated, "current": dict(FREQUENCY)}
+
+
 
 @app.get("/admin", response_class=HTMLResponse)
 @app.get("/admin/", response_class=HTMLResponse)
@@ -1681,239 +1718,404 @@ async def admin_dashboard():
     return HTMLResponse(ADMIN_HTML)
 
 
+
+# ─── PWA SUPPORT (installable as app) ──────────────────────────────────────────
+@app.get("/manifest.json")
+async def pwa_manifest():
+    return {
+        "name": "AI Voice Agent Admin",
+        "short_name": "VoiceAdmin",
+        "start_url": "/admin",
+        "display": "standalone",
+        "background_color": "#0f172a",
+        "theme_color": "#0ea5e9",
+        "icons": [{
+            "src": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTkyIiBoZWlnaHQ9IjE5MiIgdmlld0JveD0iMCAwIDE5MiAxOTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PHJlY3Qgd2lkdGg9IjE5MiIgaGVpZ2h0PSIxOTIiIHJ4PSI0MCIgZmlsbD0iIzBlYTUxMyIvPjx0ZXh0IHg9Ijk2IiB5PSIxMjAiIGZvbnQtc2l6ZT0iODAiIGZpbGw9IndoaXRlIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj7wn5SZPC90ZXh0Pjwvc3ZnPg==",
+            "sizes": "192x192",
+            "type": "image/svg+xml"
+        }]
+    }
+
+@app.get("/sw.js")
+async def pwa_sw():
+    js = 'self.addEventListener("install", e => self.skipWaiting()); self.addEventListener("fetch", e => {});'
+    return PlainTextResponse(js, media_type="application/javascript")
+
 ADMIN_HTML = """<!doctype html>
-<html lang="en"><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>AI Voice Agent — Ad Dashboard</title>
-<style>
-:root{--bg:#0b0e14;--card:#151a23;--line:#222b3a;--txt:#e6edf3;--mut:#8b98a9;--acc:#4f9cf9;--good:#3fb950;--warn:#d29922;}
-*{box-sizing:border-box}body{margin:0;font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--txt)}
-header{padding:18px 24px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:16px;flex-wrap:wrap}
-h1{font-size:18px;margin:0;font-weight:600}
-.wrap{padding:24px;max-width:1100px;margin:0 auto}
-.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:14px;margin-bottom:24px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px}
-.card .k{color:var(--mut);font-size:12px;text-transform:uppercase;letter-spacing:.04em}
-.card .v{font-size:26px;font-weight:700;margin-top:6px}
-.card .v.good{color:var(--good)}
-table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden}
-th,td{padding:11px 14px;text-align:left;border-bottom:1px solid var(--line);font-size:14px}
-th{color:var(--mut);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.04em}
-tr:last-child td{border-bottom:none}
-.pill{display:inline-block;padding:2px 9px;border-radius:99px;font-size:12px;font-weight:600}
-.pill.on{background:rgba(63,185,80,.15);color:var(--good)}
-.pill.off{background:rgba(210,153,34,.15);color:var(--warn)}
-button{background:var(--acc);color:#fff;border:0;border-radius:8px;padding:8px 14px;font-weight:600;cursor:pointer;font-size:14px}
-button.ghost{background:transparent;border:1px solid var(--line);color:var(--txt)}
-button.danger{background:transparent;border:1px solid #5a2330;color:#f85149}
-button:hover{opacity:.9}
-h2{font-size:15px;margin:28px 0 12px;color:var(--mut);text-transform:uppercase;letter-spacing:.04em}
-input,textarea{width:100%;background:#0d1117;border:1px solid var(--line);border-radius:8px;color:var(--txt);padding:9px 11px;font:inherit}
-label{display:block;font-size:12px;color:var(--mut);margin:10px 0 4px}
-.row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-.gate{max-width:380px;margin:80px auto;text-align:center}
-.muted{color:var(--mut);font-size:13px}
-.err{color:#f85149;font-size:13px;margin-top:8px;min-height:18px}
-.actions{display:flex;gap:8px;flex-wrap:wrap}
-.modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:flex-start;justify-content:center;overflow:auto;z-index:50}
-.modal-bg.show{display:flex}
-.modal{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:22px;max-width:640px;width:92%;margin:48px 0}
-.modal h3{margin:0 0 4px;font-size:17px}
-.variant{border:1px solid var(--line);border-radius:10px;padding:12px;margin-top:10px;position:relative}
-.variant .vrm{position:absolute;top:8px;right:8px}
-.small{font-size:12px;padding:5px 10px}
-</style></head><body>
-<div id="gate" class="gate">
-  <h1>🔐 Ad Dashboard</h1>
-  <p class="muted">Enter your admin token to continue.</p>
-  <input id="tok" type="password" placeholder="ADMIN_TOKEN" autofocus>
-  <div style="margin-top:12px"><button onclick="login()">Unlock</button></div>
-  <div id="gerr" class="err"></div>
-</div>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI Voice Admin</title>
+  <meta name="theme-color" content="#0f172a">
+  <link rel="manifest" href="/manifest.json">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; }
+    .nav-item { transition: all 0.1s; }
+    .nav-item.active { background-color: #1e2937; border-left: 3px solid #0ea5e9; }
+    .section { display: none; }
+    .section.active { display: block; }
+    @media (max-width: 768px) {
+      .sidebar { width: 100%; position: fixed; top: 0; left: 0; z-index: 50; transform: translateX(-100%); }
+      .sidebar.open { transform: translateX(0); }
+      .main-content { margin-left: 0; }
+    }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-200">
+  <div class="flex h-screen overflow-hidden">
+    <!-- Sidebar / Mobile Nav -->
+    <div id="sidebar" class="sidebar w-64 bg-slate-900 border-r border-slate-800 flex flex-col">
+      <div class="p-4 border-b border-slate-800 flex items-center gap-3">
+        <div class="w-9 h-9 bg-sky-500 rounded-xl flex items-center justify-center text-xl">📞</div>
+        <div>
+          <div class="font-semibold text-lg">Voice Agent</div>
+          <div class="text-xs text-slate-400">Admin Console</div>
+        </div>
+      </div>
 
-<div id="app" style="display:none">
-<header>
-  <h1>📞 AI Voice Agent</h1>
-  <span class="muted" id="sub">Ad performance dashboard</span>
-  <span style="flex:1"></span>
-  <button class="ghost" onclick="load()">↻ Refresh</button>
-  <button class="ghost" onclick="logout()">Lock</button>
-</header>
-<div class="wrap">
-  <div class="cards" id="cards"></div>
+      <div class="p-2 flex-1">
+        <div onclick="showSection('overview')" class="nav-item active flex items-center gap-3 px-3 py-2.5 rounded-xl cursor-pointer mb-1" data-nav="overview">
+          <span>📊</span> <span>Overview</span>
+        </div>
+        <div onclick="showSection('ads')" class="nav-item flex items-center gap-3 px-3 py-2.5 rounded-xl cursor-pointer mb-1" data-nav="ads">
+          <span>📢</span> <span>Manage Ads</span>
+        </div>
+        <div onclick="showSection('frequency')" class="nav-item flex items-center gap-3 px-3 py-2.5 rounded-xl cursor-pointer mb-1" data-nav="frequency">
+          <span>⏱️</span> <span>Frequency</span>
+        </div>
+        <div onclick="showSection('logs')" class="nav-item flex items-center gap-3 px-3 py-2.5 rounded-xl cursor-pointer" data-nav="logs">
+          <span>📋</span> <span>Recent Plays</span>
+        </div>
+      </div>
 
-  <h2>Ads — times heard &amp; revenue</h2>
-  <table id="adtbl"><thead><tr>
-    <th>Sponsor</th><th>Industry</th><th>Status</th><th>Times Heard</th><th>CPM</th><th>Revenue</th><th>Variants</th><th></th>
-  </tr></thead><tbody></tbody></table>
-
-  <h2>Add a new ad</h2>
-  <div class="card">
-    <div class="row">
-      <div><label>Sponsor name</label><input id="f_sponsor" placeholder="Acme Co."></div>
-      <div><label>Industry</label><input id="f_industry" placeholder="technology / health / travel / legal / home_services"></div>
+      <div class="p-4 border-t border-slate-800 text-xs text-slate-400">
+        <div>Token: <span id="token-status" class="text-emerald-400">connected</span></div>
+        <button onclick="installPWA()" class="mt-3 text-sky-400 hover:text-sky-300 text-xs">Install as App</button>
+      </div>
     </div>
-    <label>Keywords (comma-separated — trigger the ad when caller mentions these)</label>
-    <input id="f_keywords" placeholder="software, app, cloud, automation">
-    <label>Script (what the agent says aloud — spell URLs like 'acme dot com')</label>
-    <textarea id="f_script" rows="2" placeholder="Quick tip from Acme: ..."></textarea>
-    <div class="row">
-      <div><label>Bid CPM (USD per 1000 plays)</label><input id="f_cpm" type="number" value="10.0" step="0.5"></div>
-      <div><label>Daily cap (max plays/day)</label><input id="f_cap" type="number" value="500"></div>
+
+    <!-- Main Content -->
+    <div class="flex-1 flex flex-col main-content overflow-auto">
+      <!-- Top Bar -->
+      <div class="h-14 border-b border-slate-800 px-4 flex items-center justify-between bg-slate-900/70">
+        <div class="flex items-center gap-3">
+          <button onclick="toggleMobileSidebar()" class="md:hidden text-xl">☰</button>
+          <div id="section-title" class="font-semibold text-lg">Overview</div>
+        </div>
+        <div class="text-xs text-slate-400">Live on Render • <span id="last-updated"></span></div>
+      </div>
+
+      <!-- Overview -->
+      <div id="overview" class="section active p-6">
+        <h1 class="text-2xl font-semibold mb-6">Call & Revenue Overview</h1>
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div class="bg-slate-900 rounded-2xl p-5">
+            <div class="text-slate-400 text-sm">Total Revenue</div>
+            <div id="total-revenue" class="text-3xl font-semibold mt-1 text-emerald-400">$0.00</div>
+          </div>
+          <div class="bg-slate-900 rounded-2xl p-5">
+            <div class="text-slate-400 text-sm">Total Ad Plays</div>
+            <div id="total-plays" class="text-3xl font-semibold mt-1">0</div>
+          </div>
+          <div class="bg-slate-900 rounded-2xl p-5">
+            <div class="text-slate-400 text-sm">Active Ads</div>
+            <div id="active-ads" class="text-3xl font-semibold mt-1">0</div>
+          </div>
+        </div>
+        <div class="mt-8 text-sm text-slate-400">Frequency is currently controlled via the Frequency tab. Changes apply immediately to new calls.</div>
+      </div>
+
+      <!-- Manage Ads -->
+      <div id="ads" class="section p-6">
+        <div class="flex justify-between items-center mb-4">
+          <h2 class="text-xl font-semibold">Manage Paid Ads</h2>
+          <button onclick="showCreateAdModal()" class="px-4 py-2 bg-sky-600 hover:bg-sky-500 rounded-xl text-sm">+ New Ad</button>
+        </div>
+        <div id="ads-list" class="space-y-3"></div>
+      </div>
+
+      <!-- Frequency Controls -->
+      <div id="frequency" class="section p-6">
+        <h2 class="text-xl font-semibold mb-2">Ad Frequency Controls</h2>
+        <p class="text-slate-400 mb-6 text-sm">Control how many ads are played relative to actual phone time per call.</p>
+
+        <div class="max-w-md bg-slate-900 rounded-2xl p-6 space-y-5">
+          <div>
+            <label class="block text-sm text-slate-400 mb-1">Minimum seconds between ads (per call)</label>
+            <input id="min-interval" type="number" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2 text-lg">
+          </div>
+          <div>
+            <label class="block text-sm text-slate-400 mb-1">Max ads allowed in window</label>
+            <input id="max-ads" type="number" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2 text-lg">
+          </div>
+          <div>
+            <label class="block text-sm text-slate-400 mb-1">Window length (seconds)</label>
+            <input id="window-seconds" type="number" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2 text-lg">
+            <div class="text-xs text-slate-500 mt-1">e.g. 600 = last 10 minutes of the call</div>
+          </div>
+
+          <button onclick="saveFrequency()" class="w-full mt-2 py-3 bg-emerald-600 hover:bg-emerald-500 rounded-2xl font-medium">Save Frequency Settings</button>
+          <div id="freq-status" class="text-center text-sm text-emerald-400 h-5"></div>
+        </div>
+      </div>
+
+      <!-- Recent Plays -->
+      <div id="logs" class="section p-6">
+        <h2 class="text-xl font-semibold mb-4">Recent Ad Plays</h2>
+        <div id="logs-list" class="space-y-2 text-sm font-mono"></div>
+      </div>
     </div>
-    <div style="margin-top:14px"><button onclick="addAd()">+ Create Ad</button> <span id="aerr" class="err"></span></div>
   </div>
 
-  <h2>Recent plays</h2>
-  <table id="imptbl"><thead><tr><th>When</th><th>Sponsor</th><th>Caller</th><th>Revenue</th></tr></thead><tbody></tbody></table>
-</div>
-</div>
-
-<!-- Edit modal -->
-<div id="modalbg" class="modal-bg" onclick="if(event.target===this)closeEdit()">
-  <div class="modal">
-    <h3>Edit ad</h3>
-    <div class="muted" id="e_id" style="margin-bottom:8px"></div>
-    <div class="row">
-      <div><label>Sponsor</label><input id="e_sponsor"></div>
-      <div><label>Industry</label><input id="e_industry"></div>
-    </div>
-    <label>Default keywords (comma-separated)</label>
-    <input id="e_keywords">
-    <label>Default script</label>
-    <textarea id="e_script" rows="2"></textarea>
-    <div class="row">
-      <div><label>Bid CPM</label><input id="e_cpm" type="number" step="0.5"></div>
-      <div><label>Daily cap</label><input id="e_cap" type="number"></div>
-    </div>
-
-    <h2 style="margin-top:18px">Keyword variants <span class="muted" style="text-transform:none">— different scripts for different keywords</span></h2>
-    <div class="muted" style="margin-bottom:6px">When the caller's words match a variant's keywords, that script plays instead of the default.</div>
-    <div id="e_variants"></div>
-    <button class="ghost small" style="margin-top:8px" onclick="addVariantRow()">+ Add variant</button>
-
-    <div style="margin-top:18px;display:flex;gap:10px;align-items:center">
-      <button onclick="saveEdit()">Save changes</button>
-      <button class="ghost" onclick="closeEdit()">Cancel</button>
-      <span id="eerr" class="err"></span>
+  <!-- Create/Edit Modal -->
+  <div id="modal" onclick="if (event.target.id === 'modal') hideModal()" class="hidden fixed inset-0 bg-black/70 flex items-center justify-center z-[100]">
+    <div onclick="event.stopImmediatePropagation()" class="bg-slate-900 w-full max-w-lg mx-4 rounded-3xl p-6">
+      <div id="modal-content"></div>
     </div>
   </div>
-</div>
 
 <script>
-let TOK = sessionStorage.getItem("adm_tok") || "";
-let ADS = {};  // id -> ad object, cached from last load
-function hdr(){return {"X-Admin-Token":TOK,"Content-Type":"application/json"};}
-async function api(path,opts){opts=opts||{};opts.headers=hdr();const r=await fetch(path,opts);if(r.status===401)throw new Error("Unauthorized");if(!r.ok)throw new Error("HTTP "+r.status);return r.json();}
-function login(){TOK=document.getElementById("tok").value.trim();sessionStorage.setItem("adm_tok",TOK);load();}
-function logout(){TOK="";sessionStorage.removeItem("adm_tok");document.getElementById("app").style.display="none";document.getElementById("gate").style.display="block";}
-function money(n){return "$"+Number(n).toFixed(n<1?4:2);}
-function esc(s){return (s==null?"":String(s)).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\\"":"&quot;"}[c]));}
-async function load(){
-  try{
-    const d=await api("/admin/stats");
-    document.getElementById("gate").style.display="none";
-    document.getElementById("app").style.display="block";
-    document.getElementById("gerr").textContent="";
-    const t=d.totals;
-    document.getElementById("cards").innerHTML=[
-      ["Total plays",t.total_plays],
-      ["Revenue (run)","<span class='good'>"+money(t.total_revenue_usd)+"</span>"],
-      ["Active ads",t.active_ads+" / "+t.total_ads],
-      ["Live calls",t.sessions_active],
-      ["Impressions",t.impressions_logged],
-    ].map(([k,v])=>`<div class='card'><div class='k'>${k}</div><div class='v'>${v}</div></div>`).join("");
-    ADS={};
-    d.ads.forEach(a=>ADS[a.id]=a);
-    document.querySelector("#adtbl tbody").innerHTML=d.ads.map(a=>`<tr>
-      <td>${esc(a.sponsor)}</td><td>${esc(a.industry)}</td>
-      <td><span class='pill ${a.active?"on":"off"}'>${a.active?"Active":"Paused"}</span></td>
-      <td><b>${a.plays}</b></td><td>${money(a.bid_cpm)}</td><td class='good'>${money(a.revenue_usd)}</td>
-      <td>${(a.variants&&a.variants.length)?a.variants.length:"—"}</td>
-      <td class='actions'>
-        <button class='ghost small' onclick="openEdit('${a.id}')">Edit</button>
-        <button class='ghost small' onclick="toggleAd('${a.id}')">${a.active?"Pause":"Resume"}</button>
-        <button class='danger small' onclick="delAd('${a.id}')">Delete</button>
-      </td></tr>`).join("") || "<tr><td colspan=8 class='muted'>No ads yet.</td></tr>";
-    document.querySelector("#imptbl tbody").innerHTML=(d.recent_impressions||[]).map(i=>`<tr>
-      <td class='muted'>${new Date(i.ts*1000).toLocaleString()}</td>
-      <td>${esc(i.sponsor)}</td><td>${esc(i.caller_id||"—")}</td><td class='good'>${money(i.revenue_usd)}</td>
-      </tr>`).join("") || "<tr><td colspan=4 class='muted'>No plays yet.</td></tr>";
-  }catch(e){
-    if(e.message==="Unauthorized"){document.getElementById("gerr").textContent="Wrong token.";logout();}
-    else document.getElementById("gerr").textContent=e.message;
-  }
-}
-async function toggleAd(id){await api("/admin/ads/"+id+"/toggle",{method:"POST"});load();}
-async function delAd(id){if(confirm("Delete this ad?")){await api("/admin/ads/"+id,{method:"DELETE"});load();}}
-async function addAd(){
-  const body={
-    sponsor:document.getElementById("f_sponsor").value.trim(),
-    industry:document.getElementById("f_industry").value.trim(),
-    keywords:document.getElementById("f_keywords").value.split(",").map(s=>s.trim()).filter(Boolean),
-    script:document.getElementById("f_script").value.trim(),
-    bid_cpm:parseFloat(document.getElementById("f_cpm").value)||0,
-    daily_cap:parseInt(document.getElementById("f_cap").value)||500,
-  };
-  if(!body.sponsor||!body.script){document.getElementById("aerr").textContent="Sponsor and script required.";return;}
-  try{await api("/admin/ads",{method:"POST",body:JSON.stringify(body)});
-    ["f_sponsor","f_industry","f_keywords","f_script"].forEach(i=>document.getElementById(i).value="");
-    document.getElementById("aerr").textContent="";load();
-  }catch(e){document.getElementById("aerr").textContent=e.message;}
+let ADMIN_TOKEN = localStorage.getItem('admin_token') || '';
+let currentSection = 'overview';
+
+function setToken(t) {
+  ADMIN_TOKEN = t;
+  localStorage.setItem('admin_token', t);
+  document.getElementById('token-status').textContent = 'connected';
 }
 
-// ---- Edit modal + variants ----
-let EDIT_ID=null;
-function variantRowHTML(kw,script){
-  return `<div class="variant">
-    <button class="danger small vrm" onclick="this.parentNode.remove()">✕</button>
-    <label>Trigger keywords (comma-separated)</label>
-    <input class="v_kw" value="${esc((kw||[]).join(', '))}">
-    <label>Script for these keywords</label>
-    <textarea class="v_script" rows="2">${esc(script||"")}</textarea>
-  </div>`;
+async function api(path, method = 'GET', body = null) {
+  const headers = { 'X-Admin-Token': ADMIN_TOKEN };
+  if (body) headers['Content-Type'] = 'application/json';
+  const res = await fetch(path, { method, headers, body: body ? JSON.stringify(body) : undefined });
+  if (!res.ok) {
+    if (res.status === 401) {
+      const tok = prompt('Enter Admin Token (X-Admin-Token):');
+      if (tok) { setToken(tok); return api(path, method, body); }
+    }
+    throw new Error(await res.text());
+  }
+  return res.json();
 }
-function addVariantRow(kw,script){
-  document.getElementById("e_variants").insertAdjacentHTML("beforeend",variantRowHTML(kw,script));
+
+function showSection(name) {
+  document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+  document.getElementById(name).classList.add('active');
+
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  const nav = document.querySelector(`[data-nav="${name}"]`);
+  if (nav) nav.classList.add('active');
+
+  document.getElementById('section-title').textContent = name.charAt(0).toUpperCase() + name.slice(1);
+
+  if (name === 'ads') loadAds();
+  if (name === 'overview') loadOverview();
+  if (name === 'frequency') loadFrequency();
+  if (name === 'logs') loadLogs();
 }
-function openEdit(id){
-  const a=ADS[id]; if(!a)return;
-  EDIT_ID=id;
-  document.getElementById("e_id").textContent="ID: "+id;
-  document.getElementById("e_sponsor").value=a.sponsor||"";
-  document.getElementById("e_industry").value=a.industry||"";
-  document.getElementById("e_keywords").value=(a.keywords||[]).join(", ");
-  document.getElementById("e_script").value=a.script||"";
-  document.getElementById("e_cpm").value=a.bid_cpm||0;
-  document.getElementById("e_cap").value=a.daily_cap||500;
-  document.getElementById("e_variants").innerHTML="";
-  (a.variants||[]).forEach(v=>addVariantRow(v.keywords,v.script));
-  document.getElementById("eerr").textContent="";
-  document.getElementById("modalbg").classList.add("show");
+
+async function loadOverview() {
+  try {
+    const stats = await api('/admin/stats');
+    document.getElementById('total-revenue').textContent = '$' + (stats.total_revenue_usd || 0).toFixed(2);
+    document.getElementById('total-plays').textContent = stats.total_plays || 0;
+    document.getElementById('active-ads').textContent = (stats.ads || []).filter(a => a.active).length;
+  } catch(e) { console.error(e); }
 }
-function closeEdit(){document.getElementById("modalbg").classList.remove("show");EDIT_ID=null;}
-async function saveEdit(){
-  if(!EDIT_ID)return;
-  const variants=[...document.querySelectorAll("#e_variants .variant")].map(v=>({
-    keywords:v.querySelector(".v_kw").value.split(",").map(s=>s.trim()).filter(Boolean),
-    script:v.querySelector(".v_script").value.trim(),
-  })).filter(v=>v.script);
-  const body={
-    sponsor:document.getElementById("e_sponsor").value.trim(),
-    industry:document.getElementById("e_industry").value.trim(),
-    keywords:document.getElementById("e_keywords").value.split(",").map(s=>s.trim()).filter(Boolean),
-    script:document.getElementById("e_script").value.trim(),
-    bid_cpm:parseFloat(document.getElementById("e_cpm").value)||0,
-    daily_cap:parseInt(document.getElementById("e_cap").value)||500,
-    variants:variants,
+
+async function loadAds() {
+  const stats = await api('/admin/stats');
+  const container = document.getElementById('ads-list');
+  container.innerHTML = '';
+  (stats.ads || []).forEach(ad => {
+    const div = document.createElement('div');
+    div.className = `bg-slate-900 rounded-2xl p-4 flex justify-between items-start ${ad.active ? '' : 'opacity-60'}`;
+    div.innerHTML = `
+      <div class="flex-1">
+        <div class="font-medium">${ad.sponsor} <span class="text-xs px-2 py-0.5 rounded bg-slate-800">${ad.id}</span></div>
+        <div class="text-xs text-slate-400 mt-0.5">${(ad.keywords || []).join(', ')}</div>
+        <div class="text-xs mt-1 text-slate-500">Plays: ${stats.play_counts?.[ad.id] || 0} • $${((stats.play_counts?.[ad.id] || 0) * (ad.bid_cpm / 1000)).toFixed(2)}</div>
+      </div>
+      <div class="flex flex-col gap-1 text-right text-xs">
+        <button onclick="editAd('${ad.id}')" class="text-sky-400 hover:text-sky-300">Edit</button>
+        <button onclick="toggleAd('${ad.id}')" class="text-amber-400 hover:text-amber-300">${ad.active ? 'Pause' : 'Activate'}</button>
+        <button onclick="deleteAd('${ad.id}')" class="text-red-400 hover:text-red-300">Delete</button>
+      </div>
+    `;
+    container.appendChild(div);
+  });
+}
+
+async function loadFrequency() {
+  try {
+    const s = await api('/admin/settings');
+    const f = s.frequency || {};
+    document.getElementById('min-interval').value = f.min_interval_seconds ?? 90;
+    document.getElementById('max-ads').value = f.max_ads ?? 2;
+    document.getElementById('window-seconds').value = f.window_seconds ?? 600;
+  } catch(e) { console.error(e); }
+}
+
+async function saveFrequency() {
+  const payload = {
+    min_interval_seconds: parseInt(document.getElementById('min-interval').value),
+    max_ads: parseInt(document.getElementById('max-ads').value),
+    window_seconds: parseInt(document.getElementById('window-seconds').value)
   };
-  try{await api("/admin/ads/"+EDIT_ID,{method:"PUT",body:JSON.stringify(body)});
-    closeEdit();load();
-  }catch(e){document.getElementById("eerr").textContent=e.message;}
+  try {
+    await api('/admin/settings', 'PUT', payload);
+    document.getElementById('freq-status').textContent = 'Saved ✓ Changes apply to new calls immediately';
+    setTimeout(() => document.getElementById('freq-status').textContent = '', 2200);
+  } catch(e) {
+    alert('Failed to save: ' + e.message);
+  }
 }
-if(TOK) load();
+
+async function loadLogs() {
+  const stats = await api('/admin/stats');
+  const container = document.getElementById('logs-list');
+  container.innerHTML = '';
+  (stats.recent_impressions || []).slice(0, 30).forEach(imp => {
+    const div = document.createElement('div');
+    div.className = 'bg-slate-900 px-3 py-1.5 rounded-xl flex justify-between text-xs';
+    div.innerHTML = `<span>${new Date(imp.ts * 1000).toLocaleString()}</span> <span>${imp.sponsor} • $${imp.revenue_usd.toFixed(4)}</span>`;
+    container.appendChild(div);
+  });
+}
+
+async function editAd(id) {
+  const stats = await api('/admin/stats');
+  const ad = (stats.ads || []).find(a => a.id === id);
+  if (!ad) return;
+
+  const html = `
+    <h3 class="font-semibold mb-4">Edit Ad</h3>
+    <div class="space-y-3 text-sm">
+      <input id="m-sponsor" value="${ad.sponsor || ''}" class="w-full bg-slate-800 px-3 py-2 rounded-xl" placeholder="Sponsor">
+      <input id="m-script" value="${ad.script || ''}" class="w-full bg-slate-800 px-3 py-2 rounded-xl" placeholder="Script">
+      <div class="grid grid-cols-2 gap-3">
+        <input id="m-bid" type="number" value="${ad.bid_cpm || 0}" class="bg-slate-800 px-3 py-2 rounded-xl" placeholder="Bid CPM">
+        <input id="m-cap" type="number" value="${ad.daily_cap || 100}" class="bg-slate-800 px-3 py-2 rounded-xl" placeholder="Daily Cap">
+      </div>
+      <button onclick="saveAdEdit('${id}')" class="w-full py-2.5 bg-emerald-600 rounded-2xl">Save Changes</button>
+    </div>
+  `;
+  document.getElementById('modal-content').innerHTML = html;
+  document.getElementById('modal').classList.remove('hidden');
+  document.getElementById('modal').classList.add('flex');
+}
+
+async function saveAdEdit(id) {
+  const payload = {
+    sponsor: document.getElementById('m-sponsor').value,
+    script: document.getElementById('m-script').value,
+    bid_cpm: parseFloat(document.getElementById('m-bid').value),
+    daily_cap: parseInt(document.getElementById('m-cap').value)
+  };
+  await api(`/admin/ads/${id}`, 'PUT', payload);
+  hideModal();
+  loadAds();
+}
+
+async function toggleAd(id) {
+  await api(`/admin/ads/${id}/toggle`, 'POST');
+  loadAds();
+}
+
+async function deleteAd(id) {
+  if (!confirm('Delete this ad permanently?')) return;
+  await api(`/admin/ads/${id}`, 'DELETE');
+  loadAds();
+}
+
+function showCreateAdModal() {
+  const html = `
+    <h3 class="font-semibold mb-4">Create New Ad</h3>
+    <div class="space-y-3 text-sm">
+      <input id="c-sponsor" placeholder="Sponsor Name" class="w-full bg-slate-800 px-3 py-2 rounded-xl">
+      <input id="c-keywords" placeholder="Keywords (comma separated)" class="w-full bg-slate-800 px-3 py-2 rounded-xl">
+      <textarea id="c-script" placeholder="Ad script (what is spoken)" class="w-full bg-slate-800 px-3 py-2 rounded-xl h-20"></textarea>
+      <div class="grid grid-cols-2 gap-3">
+        <input id="c-bid" type="number" placeholder="Bid CPM" value="10" class="bg-slate-800 px-3 py-2 rounded-xl">
+        <input id="c-cap" type="number" placeholder="Daily Cap" value="100" class="bg-slate-800 px-3 py-2 rounded-xl">
+      </div>
+      <button onclick="createAd()" class="w-full py-2.5 bg-sky-600 rounded-2xl">Create Ad</button>
+    </div>
+  `;
+  document.getElementById('modal-content').innerHTML = html;
+  document.getElementById('modal').classList.remove('hidden');
+  document.getElementById('modal').classList.add('flex');
+}
+
+async function createAd() {
+  const payload = {
+    sponsor: document.getElementById('c-sponsor').value,
+    industry: 'general',
+    keywords: document.getElementById('c-keywords').value.split(',').map(s => s.trim()).filter(Boolean),
+    script: document.getElementById('c-script').value,
+    bid_cpm: parseFloat(document.getElementById('c-bid').value) || 8,
+    daily_cap: parseInt(document.getElementById('c-cap').value) || 100,
+    weight: 1.0,
+    variants: []
+  };
+  await api('/admin/ads', 'POST', payload);
+  hideModal();
+  loadAds();
+}
+
+function hideModal() {
+  document.getElementById('modal').classList.add('hidden');
+  document.getElementById('modal').classList.remove('flex');
+}
+
+function toggleMobileSidebar() {
+  const sb = document.getElementById('sidebar');
+  sb.classList.toggle('open');
+}
+
+async function installPWA() {
+  if (window.deferredPrompt) {
+    window.deferredPrompt.prompt();
+  } else {
+    alert('To install: Use your browser menu → "Add to Home Screen" or "Install App"');
+  }
+}
+
+async function init() {
+  // PWA install prompt capture
+  window.addEventListener('beforeinstallprompt', (e) => {
+    e.preventDefault();
+    window.deferredPrompt = e;
+  });
+
+  // Register service worker
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/sw.js').catch(() => {});
+  }
+
+  // Ask for token if missing
+  if (!ADMIN_TOKEN) {
+    const tok = prompt('Enter your Admin Token (X-Admin-Token header):');
+    if (tok) setToken(tok);
+  }
+
+  // Initial load
+  await loadOverview();
+  document.getElementById('last-updated').textContent = new Date().toLocaleTimeString();
+
+  // Auto refresh overview
+  setInterval(() => {
+    if (document.getElementById('overview').classList.contains('active')) loadOverview();
+  }, 15000);
+}
+
+init();
 </script>
-</body></html>"""
+</body>
+</html>
+"""
 
 
 @app.on_event("startup")
@@ -1927,3 +2129,46 @@ async def _on_startup():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)), log_level="info")
+
+def db_load_settings() -> dict:
+    """Load all settings from DB as dict. Falls back to FREQUENCY defaults."""
+    if not DB_PATH:
+        return dict(FREQUENCY)
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            c = conn.cursor()
+            rows = c.execute("SELECT key, value FROM settings").fetchall()
+            loaded = {row[0]: row[1] for row in rows}
+            # Merge with defaults
+            result = dict(FREQUENCY)
+            for k, v in loaded.items():
+                if k in result:
+                    try:
+                        result[k] = int(v) if v.isdigit() else v
+                    except:
+                        result[k] = v
+            return result
+    except Exception as e:
+        log.warning(f"[db] failed to load settings: {e}")
+        return dict(FREQUENCY)
+
+def db_save_setting(key: str, value: any):
+    """Save a single setting to DB."""
+    if not DB_PATH:
+        # In-memory only if no DB
+        FREQUENCY[key] = int(value) if str(value).isdigit() else value
+        return
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            c = conn.cursor()
+            c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
+            conn.commit()
+        # Update runtime
+        if key in FREQUENCY:
+            FREQUENCY[key] = int(value) if str(value).isdigit() else value
+        log.info(f"[db] saved setting {key}={value}")
+    except Exception as e:
+        log.warning(f"[db] failed to save setting {key}: {e}")
+
+# Global runtime frequency (loaded on startup)
+FREQUENCY_SETTINGS = {}
