@@ -445,8 +445,41 @@ LLM_MODEL = os.environ.get("LLM_MODEL", "meta-llama/Meta-Llama-3.1-8B-Instruct-T
 
 TTS_PROVIDER = os.environ.get("TTS_PROVIDER", "cartesia")  # cartesia | elevenlabs | openai | deepgram
 CARTESIA_API_KEY = os.environ.get("CARTESIA_API_KEY", "")
-CARTESIA_VOICE = os.environ.get("CARTESIA_VOICE", "a79a1ab6-270d-4b3e-b14e-35e35dc18dbb")
+CARTESIA_VOICE = os.environ.get("CARTESIA_VOICE", "")  # empty => auto-resolve from account
 CARTESIA_MODEL = os.environ.get("CARTESIA_MODEL", "sonic-english")
+_resolved_voice: Optional[str] = None
+
+
+def resolve_cartesia_voice() -> str:
+    """Return a valid Cartesia voice ID. Uses CARTESIA_VOICE if set, else
+    fetches the first English voice from the account and caches it."""
+    global _resolved_voice
+    if CARTESIA_VOICE:
+        return CARTESIA_VOICE
+    if _resolved_voice:
+        return _resolved_voice
+    for ver in ("2024-11-13", "2024-06-10"):
+        try:
+            r = http.get(
+                "https://api.cartesia.ai/voices/",
+                headers={"Cartesia-Version": ver, "X-API-Key": CARTESIA_API_KEY},
+                timeout=10,
+            )
+            if r.status_code != 200:
+                continue
+            data = r.json()
+            items = data if isinstance(data, list) else data.get("data", [])
+            # prefer an English voice, else take the first available
+            en = [v for v in items if str(v.get("language", "")).startswith("en")]
+            pick = (en or items)
+            if pick:
+                _resolved_voice = pick[0]["id"]
+                log.info(f"[tts:cartesia] auto-resolved voice id={_resolved_voice} name={pick[0].get('name')}")
+                return _resolved_voice
+        except Exception as exc:
+            log.warning(f"[tts:cartesia] voice resolve failed (ver={ver}): {exc}")
+    # last-resort fallback (a commonly-available Cartesia public voice)
+    return "a0e99841-438c-4a64-b679-ae501e7d6091"
 ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY", "")
 ELEVENLABS_VOICE = os.environ.get("ELEVENLABS_VOICE", "Rachel")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
@@ -533,7 +566,7 @@ async def tts_stream(reply_text: str, websocket: WebSocket):
         payload = {
             "model_id": CARTESIA_MODEL,
             "transcript": text,
-            "voice": {"mode": "id", "id": CARTESIA_VOICE},
+            "voice": {"mode": "id", "id": resolve_cartesia_voice()},
             "output_format": {
                 "container": "raw",
                 "encoding": "pcm_mulaw",
@@ -747,7 +780,7 @@ async def _cartesia_ulaw_stream(text: str) -> Any:
     payload = {
         "model_id": CARTESIA_MODEL,
         "transcript": cleaned,
-        "voice": {"mode": "id", "id": CARTESIA_VOICE},
+        "voice": {"mode": "id", "id": resolve_cartesia_voice()},
         "output_format": {"container": "raw", "encoding": "pcm_mulaw", "sample_rate": 8000},
         "language": "en",
     }
