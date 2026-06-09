@@ -449,6 +449,7 @@ LLM_BASE = os.environ.get("LLM_BASE_URL", "https://api.together.xyz/v1")
 LLM_MODEL = os.environ.get("LLM_MODEL", "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo")
 
 TTS_PROVIDER = os.environ.get("TTS_PROVIDER", "cartesia")  # cartesia | elevenlabs | openai | deepgram
+SERPER_API_KEY = os.environ.get("SERPER_API_KEY", "")  # serper.dev — Google results for accurate phone/address lookups
 CARTESIA_API_KEY = os.environ.get("CARTESIA_API_KEY", "")
 CARTESIA_VOICE = os.environ.get("CARTESIA_VOICE", "")  # empty => auto-resolve from account
 CARTESIA_MODEL = os.environ.get("CARTESIA_MODEL", "sonic-2")
@@ -493,11 +494,123 @@ OPENAI_TTS_VOICE = os.environ.get("OPENAI_TTS_VOICE", "nova")
 http = httpx.Client(timeout=30)
 
 
+_LOOKUP_TRIGGERS = (
+    "phone number", "number for", "address", "where is", "located", "location",
+    "hours", "open", "close", "closing", "directions", "zip code", "area code",
+    "how much", "price", "cost", "weather", "near me", "nearest", "closest",
+    "what time", "when does", "contact", "website", "reviews", "rating",
+    "who is", "what is", "how do i", "look up", "find me", "search for",
+)
+
+
+def needs_web_lookup(text: str) -> bool:
+    """Heuristic: does this question need live/factual data we shouldn't guess at?"""
+    t = text.lower()
+    return any(trig in t for trig in _LOOKUP_TRIGGERS)
+
+
+async def web_lookup(query: str) -> str:
+    """Query Serper.dev (Google) and return clean factual text the LLM can read
+    aloud. Prioritises the knowledge graph (verified business phone/address/hours),
+    then answer box, then top organic results. Returns '' if unavailable."""
+    if not SERPER_API_KEY:
+        return ""
+    try:
+        r = await asyncio.to_thread(
+            http.post,
+            "https://google.serper.dev/search",
+            headers={"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"},
+            json={"q": query, "num": 5},
+        )
+    except Exception as exc:
+        log.warning(f"[serper] request failed: {exc}")
+        return ""
+    if r.status_code != 200:
+        log.warning(f"[serper] HTTP {r.status_code}: {r.text[:200]!r}")
+        return ""
+
+    try:
+        data = r.json()
+    except Exception:
+        return ""
+
+    parts: List[str] = []
+
+    # 1. Knowledge graph — the gold for businesses (verified phone/address/hours).
+    kg = data.get("knowledgeGraph") or {}
+    if kg:
+        title = kg.get("title", "")
+        attrs = kg.get("attributes", {}) or {}
+        if title:
+            parts.append(f"Name: {title}")
+        if kg.get("type"):
+            parts.append(f"Type: {kg['type']}")
+        if attrs.get("Address") or kg.get("address"):
+            parts.append(f"Address: {attrs.get('Address') or kg.get('address')}")
+        if attrs.get("Phone") or kg.get("phone"):
+            parts.append(f"Phone: {attrs.get('Phone') or kg.get('phone')}")
+        if attrs.get("Hours") or kg.get("hours"):
+            parts.append(f"Hours: {attrs.get('Hours') or kg.get('hours')}")
+        if kg.get("website"):
+            parts.append(f"Website: {kg['website']}")
+        for k, v in attrs.items():
+            if k not in ("Address", "Phone", "Hours") and len(parts) < 10:
+                parts.append(f"{k}: {v}")
+
+    # 2. Answer box — direct answers (weather, conversions, quick facts).
+    ab = data.get("answerBox") or {}
+    if ab:
+        for key in ("answer", "snippet", "title"):
+            if ab.get(key):
+                parts.append(str(ab[key]))
+                break
+
+    # 3. Map pack / places — local business results with phone+address.
+    for place in (data.get("places") or [])[:3]:
+        seg = place.get("title", "")
+        if place.get("address"):
+            seg += f" — {place['address']}"
+        if place.get("phoneNumber"):
+            seg += f" — {place['phoneNumber']}"
+        if seg:
+            parts.append(seg)
+
+    # 4. Top organic results as fallback context.
+    if not parts:
+        for o in (data.get("organic") or [])[:3]:
+            seg = o.get("title", "")
+            if o.get("snippet"):
+                seg += f": {o['snippet']}"
+            if seg:
+                parts.append(seg)
+
+    result = "\n".join(p for p in parts if p).strip()
+    return result[:1200]
+
+
 async def call_llm(session: Session, user_text: str) -> str:
     session.transcript.append({"role": "user", "text": user_text, "ts": time.time()})
     session.topic_extract = classify_industry(session.transcript)
 
     messages = build_messages(session)
+
+    # Live web lookup for factual questions (phone, address, hours, weather…).
+    if needs_web_lookup(user_text):
+        facts = await web_lookup(user_text)
+        if facts:
+            log.info(f"[serper] facts for '{user_text[:40]}': {facts[:120]!r}")
+            messages.append({
+                "role": "system",
+                "content": (
+                    "Here is current, verified information from a Google search. "
+                    "Use ONLY these facts to answer — do not invent or alter phone "
+                    "numbers, addresses, or details. Read numbers naturally for "
+                    "speech (e.g. 'six one four, five five five, zero one two three'). "
+                    "If the answer isn't here, say you couldn't find it.\n\n"
+                    f"{facts}"
+                ),
+            })
+
     payload = {
         "model": LLM_MODEL,
         "messages": messages,
