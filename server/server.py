@@ -1895,18 +1895,26 @@ ADMIN_HTML = """<!doctype html>
 
       <div id="overview" class="section active p-6">
         <h1 class="text-2xl font-semibold mb-6">Call & Revenue Overview</h1>
-        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <div class="bg-slate-900 rounded-2xl p-5">
-            <div class="text-slate-400 text-sm">Total Revenue</div>
-            <div id="total-revenue" class="text-3xl font-semibold mt-1 text-emerald-400">$0.00</div>
+        <div class="grid grid-cols-2 md:grid-cols-5 gap-3">
+          <div class="bg-slate-900 rounded-2xl p-4">
+            <div class="text-slate-400 text-xs">Total Revenue</div>
+            <div id="total-revenue" class="text-2xl font-semibold mt-0.5 text-emerald-400">$0.00</div>
           </div>
-          <div class="bg-slate-900 rounded-2xl p-5">
-            <div class="text-slate-400 text-sm">Total Ad Plays</div>
-            <div id="total-plays" class="text-3xl font-semibold mt-1">0</div>
+          <div class="bg-slate-900 rounded-2xl p-4">
+            <div class="text-slate-400 text-xs">Ad Plays</div>
+            <div id="total-plays" class="text-2xl font-semibold mt-0.5">0</div>
           </div>
-          <div class="bg-slate-900 rounded-2xl p-5">
-            <div class="text-slate-400 text-sm">Active Ads</div>
-            <div id="active-ads" class="text-3xl font-semibold mt-1">0</div>
+          <div class="bg-slate-900 rounded-2xl p-4">
+            <div class="text-slate-400 text-xs">Active Ads</div>
+            <div id="active-ads" class="text-2xl font-semibold mt-0.5">0</div>
+          </div>
+          <div class="bg-slate-900 rounded-2xl p-4">
+            <div class="text-slate-400 text-xs">Live Calls</div>
+            <div id="live-calls" class="text-2xl font-semibold mt-0.5">0</div>
+          </div>
+          <div class="bg-slate-900 rounded-2xl p-4">
+            <div class="text-slate-400 text-xs">Impressions</div>
+            <div id="impressions" class="text-2xl font-semibold mt-0.5">0</div>
           </div>
         </div>
       </div>
@@ -2030,12 +2038,17 @@ try {
   async function loadOverview() {
     try {
       const stats = await api('/admin/stats');
+      const t = stats.totals || {};
       const rev = document.getElementById('total-revenue');
       const plays = document.getElementById('total-plays');
       const active = document.getElementById('active-ads');
-      if (rev) rev.textContent = '$' + (stats.total_revenue_usd || 0).toFixed(2);
-      if (plays) plays.textContent = stats.total_plays || 0;
-      if (active) active.textContent = (stats.ads || []).filter(a => a.active).length;
+      const live = document.getElementById('live-calls');
+      const imps = document.getElementById('impressions');
+      if (rev) rev.textContent = '$' + (t.total_revenue_usd || 0).toFixed(2);
+      if (plays) plays.textContent = t.total_plays || 0;
+      if (active) active.textContent = t.active_ads || 0;
+      if (live) live.textContent = t.sessions_active || 0;
+      if (imps) imps.textContent = t.impressions_logged || 0;
     } catch(e) { console.error(e); }
   }
 
@@ -2048,11 +2061,13 @@ try {
       (stats.ads || []).forEach(ad => {
         const div = document.createElement('div');
         div.className = `bg-slate-900 rounded-2xl p-4 flex justify-between items-start ${ad.active ? '' : 'opacity-60'}`;
+        const plays = ad.plays || 0;
+        const rev = (ad.revenue_usd || 0).toFixed(2);
         div.innerHTML = `
           <div class="flex-1 min-w-0">
             <div class="font-medium truncate">${ad.sponsor} <span class="text-xs px-2 py-0.5 rounded bg-slate-800">${ad.id}</span></div>
             <div class="text-xs text-slate-400 mt-0.5 truncate">${(ad.keywords || []).join(', ')}</div>
-            <div class="text-xs mt-1 text-slate-500">Plays: ${stats.play_counts?.[ad.id] || 0} • Variants: ${(ad.variants || []).length}</div>
+            <div class="text-xs mt-1 text-slate-500">Plays: ${plays} • Rev: $${rev} • Variants: ${(ad.variants || []).length}</div>
           </div>
           <div class="flex flex-col gap-1 text-right ml-2">
             <button onclick="editAd('${ad.id}')" class="small-btn text-sky-400 hover:text-sky-300">Edit</button>
