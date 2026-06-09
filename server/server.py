@@ -159,6 +159,27 @@ def db_conn() -> sqlite3.Connection:
         _db.execute("PRAGMA journal_mode=WAL;")
     return _db
 
+def db_save_setting(key: str, value: Any):
+    with _db_lock:
+        c = db_conn()
+        c.execute(
+            "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, str(value)),
+        )
+        c.commit()
+
+def db_load_settings() -> dict:
+    with _db_lock:
+        c = db_conn()
+        rows = c.execute("SELECT key, value FROM settings").fetchall()
+        out = {}
+        for r in rows:
+            try:
+                out[r["key"]] = int(r["value"])
+            except:
+                out[r["key"]] = r["value"]
+        return out
+
 
 def db_init():
     """Create tables, seed ads on first run, then hydrate in-memory state."""
@@ -175,6 +196,10 @@ def db_init():
                 id INTEGER PRIMARY KEY AUTOINCREMENT, ad_id TEXT, session_id TEXT,
                 caller_id TEXT, sponsor TEXT, bid_cpm REAL, revenue_usd REAL,
                 ts REAL, date TEXT
+            );
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT
             );
             """
         )
@@ -232,6 +257,16 @@ def db_init():
             f"revenue=${total_revenue:.2f} impressions={len(impression_log)}"
         )
 
+        # Load persisted frequency settings from DB (overrides env defaults)
+        try:
+            saved = db_load_settings()
+            for k, v in saved.items():
+                if k in FREQUENCY:
+                    FREQUENCY[k] = int(v)
+            log.info(f"[db] loaded frequency overrides: {saved}")
+        except Exception as e:
+            log.warning(f"[db] frequency load skipped: {e}")
+
 
 def _db_upsert_ad(c: sqlite3.Connection, ad: Dict[str, Any]):
     c.execute(
@@ -277,7 +312,9 @@ def db_insert_impression(record: Dict[str, Any]):
                 record.get("ts"), record.get("date"),
             ),
         )
-        c.commit()
+
+
+# Admin dashboard auth — set ADMIN_TOKEN in Render to a long random string.        c.commit()
 
 
 # Admin dashboard auth — set ADMIN_TOKEN in Render to a long random string.
@@ -1758,14 +1795,17 @@ async def update_settings(payload: dict, x_admin_token: Optional[str] = Header(d
                 val = int(v)
                 db_save_setting(k, val)
                 updated[k] = val
-            except:
-                pass
-    # Reload into memory
-    global FREQUENCY_SETTINGS
-    FREQUENCY_SETTINGS = db_load_settings()
-    for k, v in FREQUENCY_SETTINGS.items():
-        if k in FREQUENCY:
-            FREQUENCY[k] = v
+            except Exception as e:
+                log.warning(f"[settings] bad value for {k}: {v} ({e})")
+    # Reload from DB into the live FREQUENCY dict so ad logic sees the change immediately
+    try:
+        saved = db_load_settings()
+        for k, v in saved.items():
+            if k in FREQUENCY:
+                FREQUENCY[k] = int(v)
+    except Exception as e:
+        log.warning(f"[settings] reload failed: {e}")
+    log.info(f"[settings] updated: {updated}  current FREQUENCY={FREQUENCY}")
     return {"updated": updated, "current": dict(FREQUENCY)}
 
 
