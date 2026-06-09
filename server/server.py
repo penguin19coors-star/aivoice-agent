@@ -13,6 +13,7 @@ import logging
 import html
 import asyncio
 import threading
+import audioop
 from datetime import datetime, timezone
 from dataclasses import dataclass, field, asdict
 from typing import Optional, List, Dict, Any
@@ -190,6 +191,10 @@ class Session:
     ended_at: Optional[float] = None
     metadata: Dict = field(default_factory=dict)
     dg_ws: Any = field(default=None)
+    audio_buffer: bytearray = field(default_factory=bytearray)
+    last_voice_at: float = 0.0
+    in_speech: bool = False
+    is_processing: bool = False
 
     async def ensure_dg_ws(self) -> Any:
         if self.dg_ws is None or getattr(self.dg_ws, "closed", False):
@@ -854,68 +859,126 @@ async def websocket_endpoint(websocket: WebSocket):
         )
 
 
-async def process_speech(chunk: bytes, session: Session, ws: WebSocket, stream_sid: str, send_fn=None):
-    """Send chunk to a persistent Deepgram Live socket and await the final transcript.
-
-    send_fn: optional async callable(text) used to deliver outbound audio.
-    When provided (Telnyx path), it is used instead of the Twilio send_tts format.
-    """
+async def deepgram_transcribe(audio_ulaw: bytes) -> str:
+    """Transcribe a complete µ-law (8kHz) utterance via Deepgram REST /v1/listen.
+    Reliable replacement for the streaming WebSocket which times out (1011)."""
+    if not audio_ulaw:
+        return ""
+    url = (
+        "https://api.deepgram.com/v1/listen"
+        "?encoding=mulaw&sample_rate=8000&channels=1&model=nova-2&punctuate=true&language=en-US"
+    )
+    headers = {
+        "Authorization": f"Token {DEEPGRAM_API_KEY}",
+        "Content-Type": "audio/mulaw",
+    }
     try:
-        dg = await session.ensure_dg_ws()
-        await dg.send(chunk)
+        r = await asyncio.to_thread(
+            http.post, url, headers=headers, content=audio_ulaw
+        )
     except Exception as exc:
-        log.warning(f"[ASR] send error: {exc}; socket may be stale")
-        try:
-            session.dg_ws = None
-            dg = await session.ensure_dg_ws()
-            await dg.send(chunk)
-        except Exception as exc2:
-            log.warning(f"[ASR] reconnect failed: {exc2}")
+        log.warning(f"[ASR] deepgram request failed: {exc}")
+        return ""
+    if r.status_code != 200:
+        log.warning(f"[ASR] deepgram HTTP {r.status_code}: {r.text[:200]!r}")
+        return ""
+    try:
+        data = r.json()
+        alt = (
+            data.get("results", {})
+            .get("channels", [{}])[0]
+            .get("alternatives", [{}])[0]
+        )
+        return (alt.get("transcript") or "").strip()
+    except Exception as exc:
+        log.warning(f"[ASR] deepgram parse failed: {exc}")
+        return ""
+
+
+async def process_speech(chunk: bytes, session: Session, ws: WebSocket, stream_sid: str, send_fn=None):
+    """Buffer caller audio; on end-of-utterance (silence gap) transcribe via
+    Deepgram REST, then run LLM + TTS reply. Replaces the streaming WS path."""
+    now = time.time()
+    # Measure loudness of this µ-law frame (convert to linear PCM first).
+    try:
+        pcm = audioop.ulaw2lin(chunk, 2)
+        rms = audioop.rms(pcm, 2)
+    except Exception:
+        rms = 0
+
+    SILENCE_RMS = 250          # below this = "silence"
+    MIN_UTTERANCE_BYTES = 4000  # ~0.5s of 8kHz µ-law before we bother transcribing
+    SILENCE_GAP = 0.7          # seconds of silence that ends an utterance
+
+    session.audio_buffer.extend(chunk)
+
+    if rms >= SILENCE_RMS:
+        session.last_voice_at = now
+        session.in_speech = True
+        return
+
+    # We're in a silent frame. If we were speaking and enough silence has passed, flush.
+    if not session.in_speech:
+        # cap buffer growth during long pre-speech silence
+        if len(session.audio_buffer) > 16000:
+            session.audio_buffer = bytearray(session.audio_buffer[-8000:])
+        return
+
+    if (now - session.last_voice_at) < SILENCE_GAP:
+        return
+    if len(session.audio_buffer) < MIN_UTTERANCE_BYTES:
+        session.in_speech = False
+        session.audio_buffer = bytearray()
+        return
+
+    # End of utterance — grab and reset the buffer.
+    utterance = bytes(session.audio_buffer)
+    session.audio_buffer = bytearray()
+    session.in_speech = False
+
+    # Don't start a second pipeline while one is mid-flight (avoids overlap).
+    if session.is_processing:
+        return
+
+    session.is_processing = True
+    asyncio.create_task(_handle_utterance(utterance, session, ws, stream_sid, send_fn))
+
+
+async def _handle_utterance(utterance: bytes, session: Session, ws: WebSocket, stream_sid: str, send_fn=None):
+    """Transcribe a complete utterance, then run LLM + TTS. Runs as a background
+    task so the WebSocket receive loop keeps reading inbound audio."""
+    try:
+        transcript = await deepgram_transcribe(utterance)
+        if not transcript:
             return
 
-    try:
-        raw_msg = await asyncio.wait_for(session.dg_ws.recv(), timeout=4)
-    except asyncio.TimeoutError:
-        return
+        log.info(f"[ASR] transcript={transcript}")
 
-    try:
-        data = json.loads(raw_msg)
-    except Exception:
-        return
+        # Contextual news event injection (NewsAPI)
+        event = await get_contextual_event(session)
+        if event:
+            if send_fn:
+                await send_fn(event)
+            else:
+                await send_tts(ws, stream_sid, event)
+            session.transcript.append({"role": "system", "text": event, "ts": time.time()})
 
-    if not data.get("is_final"):
-        return
+        # LLM reply
+        reply = await call_llm(session, transcript)
 
-    alt = data.get("channel", {}).get("alternatives", [{}])[0]
-    transcript = (alt.get("transcript") or "").strip()
-    if not transcript:
-        return
-    if alt.get("no_speech") or transcript.startswith(" "):
-        return
-
-    log.info(f"[ASR] transcript={transcript}")
-
-    # Contextual news event injection (NewsAPI)
-    event = await get_contextual_event(session)
-    if event:
+        # Send audio back to the caller
         if send_fn:
-            await send_fn(event)
+            await send_fn(reply)
         else:
-            await send_tts(ws, stream_sid, event)
-        session.transcript.append({"role": "system", "text": event, "ts": time.time()})
+            await send_tts(ws, stream_sid, reply)
 
-    # LLM reply
-    reply = await call_llm(session, transcript)
-
-    # Send audio back to the caller
-    if send_fn:
-        await send_fn(reply)
-    else:
-        await send_tts(ws, stream_sid, reply)
-
-    if transcript.lower().strip() in {"goodbye", "bye", "stop", "end call", "hang up"}:
-        if not send_fn:
-            await ws.send_json({"type": "hangup"})
+        if transcript.lower().strip() in {"goodbye", "bye", "stop", "end call", "hang up"}:
+            if not send_fn:
+                await ws.send_json({"type": "hangup"})
+    except Exception as exc:
+        log.warning(f"[ASR] utterance handling failed: {exc}")
+    finally:
+        session.is_processing = False
 
 
 async def send_tts(ws: WebSocket, stream_sid: str, text: str):
