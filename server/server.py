@@ -1,5 +1,6 @@
 """
 from __future__ import annotations
+import random
 AI Voice Agent Server for paid ad-supported phone calls.
 Routes: Twilio Voice → WebSocket → [Deepgram STT] → [LLM + Ad Matching] → [TTS] → Twilio
 """
@@ -482,6 +483,24 @@ def maybe_inject_ad(session: Session) -> Optional[str]:
         return pick_ad_script(ad, session)
     return None
 
+def build_post_ad_bridge(last_user_text: str) -> str:
+    """After an ad plays, create a short, natural bridge that re-engages the user
+    with what they were originally asking. Helps continue search conversations
+    smoothly instead of dead air after the sponsor message.
+    """
+    if not last_user_text:
+        return "Sorry about that quick break — what else can I help you with?"
+
+    q = last_user_text.strip()
+    # Keep it short and spoken
+    options = [
+        f"Sorry for the interruption. You were asking about {q[:70]} — what specifically were you looking for?",
+        "Anyway, going back to what you asked — did that help, or do you need more details?",
+        f"Back to your question. You mentioned {q[:60]}. Anything else on that?",
+        "Alright, back to you — what were you trying to find out?",
+    ]
+    return random.choice(options)
+
 
 # ─── REAL-TIME NEWS FEED (NewsAPI.org free tier) ───────────────────────────────
 
@@ -646,6 +665,7 @@ SILENCE_HANGUP_SEC = float(os.environ.get("SILENCE_HANGUP_SEC", "10"))
 CARTESIA_API_KEY = os.environ.get("CARTESIA_API_KEY", "")
 CARTESIA_VOICE = os.environ.get("CARTESIA_VOICE", "")  # main assistant voice; empty => auto-resolve from account
 CARTESIA_AD_VOICE = os.environ.get("CARTESIA_AD_VOICE", "")  # voice for ad reads; empty => falls back to main voice
+AD_BREAK_CUE = os.environ.get("AD_BREAK_CUE", "And now, a quick word from our sponsor.")
 CARTESIA_MODEL = os.environ.get("CARTESIA_MODEL", "sonic-2")
 _resolved_voice: Optional[str] = None
 
@@ -1463,13 +1483,32 @@ async def _handle_utterance(utterance: bytes, session: Session, ws: WebSocket, s
         if send_fn:
             if reply:
                 await send_fn(reply)
+
             if ad_line:
+                # Pre-ad cue so the caller knows a sponsor message is coming
+                cue = AD_BREAK_CUE
+                await send_fn(cue, (CARTESIA_AD_VOICE or None))
+
+                # The actual ad script (separate voice)
                 await send_fn(ad_line, (CARTESIA_AD_VOICE or None))
+
+                # Post-ad bridge: re-engage with the original question to keep
+                # momentum, especially useful for search / factual conversations.
+                bridge = build_post_ad_bridge(transcript)
+                if bridge:
+                    await send_fn(bridge)  # back to main voice
+
         else:
+            # Legacy / Twilio path (no separate voice support here)
             if reply:
                 await send_tts(ws, stream_sid, reply)
             if ad_line:
+                cue = AD_BREAK_CUE
+                await send_tts(ws, stream_sid, cue)
                 await send_tts(ws, stream_sid, ad_line)
+                bridge = build_post_ad_bridge(transcript)
+                if bridge:
+                    await send_tts(ws, stream_sid, bridge)
 
         if transcript.lower().strip() in {"goodbye", "bye", "stop", "end call", "hang up"}:
             if not send_fn:
