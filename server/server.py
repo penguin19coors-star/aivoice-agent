@@ -393,19 +393,30 @@ def classify_industry(transcript: List[Dict]) -> Dict[str, float]:
 
 
 def select_ad(session: Session) -> Optional[Dict[str, Any]]:
-    """Select the best ad for this moment.
-    - Global 90-second cooldown between any ads (per call).
-    - Respects each ad's daily_cap.
-    - No longer blocks the same ad ID per caller/session.
-      This allows the same sponsor's ad (and different variants) to play
-      multiple times for the same caller during longer conversations.
+    """Select the best ad for this moment using configurable frequency controls.
+
+    Frequency rules (all per individual call / phone time):
+    - AD_MIN_INTERVAL_SECONDS: minimum time since the last ad in this call.
+    - AD_MAX_ADS / AD_WINDOW_SECONDS: maximum number of ads allowed in any rolling
+      window of AD_WINDOW_SECONDS (e.g. max 2 ads in the last 10 minutes of call time).
+    - Each ad also respects its own daily_cap (global across all callers).
+    - Same ad + variants are allowed to repeat (no per-caller blacklist).
+
+    This gives fine-grained control over ad density without hard-coding numbers.
     """
     now = time.time()
-    if now - session.last_ad_at < 90:
+
+    # 1. Enforce minimum spacing between ads in this call
+    if session.last_ad_at > 0 and (now - session.last_ad_at) < AD_MIN_INTERVAL_SECONDS:
         return None
-    # NOTE: We intentionally no longer skip ads that were already played
-    # in this session. The same ad + its keyword variants can now repeat
-    # for the same caller (subject to cooldown and daily_cap).
+
+    # 2. Enforce maximum ads in a rolling time window (based on call/phone time)
+    if AD_MAX_ADS > 0 and AD_WINDOW_SECONDS > 0:
+        window_start = now - AD_WINDOW_SECONDS
+        recent_ads = [t for t in session.ad_play_times if t >= window_start]
+        if len(recent_ads) >= AD_MAX_ADS:
+            return None
+
     context = session.topic_extract or classify_industry(session.transcript)
 
     candidates = []
@@ -432,7 +443,8 @@ def select_ad(session: Session) -> Optional[Dict[str, Any]]:
 
     log.info(
         f"[ad] selected {best['ad']['id']} sponsor={best['ad']['sponsor']} "
-        f"score={best['score']:.2f} relevance={best['relevance']:.2f}"
+        f"score={best['score']:.2f} relevance={best['relevance']:.2f} "
+        f"(window_ads={len([t for t in session.ad_play_times if t >= now - AD_WINDOW_SECONDS])})"
     )
     return best["ad"]
 
@@ -484,8 +496,10 @@ def pick_ad_script(ad: Dict[str, Any], session: Session) -> str:
 def maybe_inject_ad(session: Session) -> Optional[str]:
     ad = select_ad(session)
     if ad:
+        now = time.time()
         session.ads_played.append(ad["id"])
-        session.last_ad_at = time.time()
+        session.last_ad_at = now
+        session.ad_play_times.append(now)   # for rolling window frequency control
         record_play(ad["id"], session.session_id, session.caller_id)
         return pick_ad_script(ad, session)
     return None
@@ -673,6 +687,12 @@ CARTESIA_API_KEY = os.environ.get("CARTESIA_API_KEY", "")
 CARTESIA_VOICE = os.environ.get("CARTESIA_VOICE", "")  # main assistant voice; empty => auto-resolve from account
 CARTESIA_AD_VOICE = os.environ.get("CARTESIA_AD_VOICE", "")  # voice for ad reads; empty => falls back to main voice
 AD_BREAK_CUE = os.environ.get("AD_BREAK_CUE", "And now, a quick word from our sponsor.")
+
+# Ad frequency controls (per call / phone time)
+# These let you control how many ads are played relative to call duration.
+AD_MIN_INTERVAL_SECONDS = int(os.environ.get("AD_MIN_INTERVAL_SECONDS", "90"))
+AD_MAX_ADS = int(os.environ.get("AD_MAX_ADS", "2"))
+AD_WINDOW_SECONDS = int(os.environ.get("AD_WINDOW_SECONDS", "600"))  # e.g. 600 = 10 minutes
 CARTESIA_MODEL = os.environ.get("CARTESIA_MODEL", "sonic-2")
 _resolved_voice: Optional[str] = None
 
