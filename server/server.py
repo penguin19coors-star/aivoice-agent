@@ -694,19 +694,94 @@ async def telnyx_hangup(call_control_id: str):
         log.warning(f"[telnyx] hangup failed: {exc}")
 
 
-_LOOKUP_TRIGGERS = (
-    "phone number", "number for", "address", "where is", "located", "location",
-    "hours", "open", "close", "closing", "directions", "zip code", "area code",
-    "how much", "price", "cost", "weather", "near me", "nearest", "closest",
-    "what time", "when does", "contact", "website", "reviews", "rating",
-    "who is", "what is", "how do i", "look up", "find me", "search for",
-)
+# Improved web search trigger logic (cheap heuristics, no extra LLM cost).
+# We only pay for Serper on questions that actually need current data.
+MUST_SEARCH = [
+    "phone number", "number for", "address for", "hours for", "open today",
+    "directions to", "near me", "closest", "nearest",
+    "weather", "forecast", "temperature", "raining", "stock", "stocks",
+    "stock price", "score", "scores", "who won", "game today", "live score",
+    "news", "latest news", "breaking", "what happened",
+    "current price", "how much does", "price of", "in stock", "where to buy",
+    "part number", "specs for",
+]
+HISTORICAL_SKIP = ["who was", "when did", "what was", "in 17", "in 18", "in 19", "in 20",
+                   "died in", "lived in", "built in", "abraham lincoln", "george washington",
+                   "ancient", "history of", "last century"]
+CURRENT_MARKERS = ["today", "right now", "currently", "latest", "this week", "live", "as of now"]
 
+def needs_web_lookup(text: str, transcript=None):
+    """Smart trigger: search only for things that need fresh data.
+    Keeps cost low by skipping historical facts and pure conversation."""
+    if not text: return False
+    t = text.lower().strip()
 
-def needs_web_lookup(text: str) -> bool:
-    """Heuristic: does this question need live/factual data we shouldn't guess at?"""
-    t = text.lower()
-    return any(trig in t for trig in _LOOKUP_TRIGGERS)
+    # Conversational chit-chat — never search
+    chit_chat = ("how are you", "how's it going", "what's up", "how you doing",
+                 "tell me a joke", "what's your name", "who are you")
+    if any(c in t for c in chit_chat):
+        return False
+
+    # Business / local lookups — always search (core accuracy requirement)
+    if any(x in t for x in ("phone", "address", "hours", "open", "directions", "near me", "closest", "nearest")):
+        return True
+
+    # Hard categories the user specified (news, sports, weather, stocks, product info)
+    if any(p in t for p in MUST_SEARCH):
+        return True
+
+    # Current-time language, but only if not clearly historical
+    has_now = any(m in t for m in CURRENT_MARKERS)
+    hist = any(h in t for h in HISTORICAL_SKIP)
+    if has_now and not hist:
+        return True
+
+    # "what is / who is / where is" style questions:
+    # Only search if it smells like current/business info.
+    # Skip pure static geography/history that the model knows.
+    if any(b in t for b in ("what is", "who is", "how much", "price", "where is", "what are")):
+        if hist:
+            return False
+        # If it has business/current flavor words, search
+        business_flavor = ("price", "cost", "open", "store", "company", "stock", "news", "game", "weather", "today", "now")
+        if any(w in t for w in business_flavor):
+            return True
+        # Otherwise leave static facts (capitals, historical definitions, etc.) to the model
+        return False
+
+    # Follow-up context
+    if transcript:
+        recent = " ".join(m.get("text","") for m in transcript[-3:] if m.get("role")=="user").lower()
+        if any(m in recent for m in CURRENT_MARKERS) and not hist:
+            return True
+    return False
+    t = text.lower().strip()
+
+    # Business / local lookups — always search (core requirement)
+    if any(x in t for x in ("phone", "address", "hours", "open", "directions", "near me", "closest", "nearest")):
+        return True
+
+    # Hard categories the user specified
+    if any(p in t for p in MUST_SEARCH):
+        return True
+
+    # Current-time language
+    has_now = any(m in t for m in CURRENT_MARKERS)
+    hist = any(h in t for h in HISTORICAL_SKIP)
+    if has_now and not hist:
+        return True
+
+    # "what is / who is" style only if not historical
+    if any(b in t for b in ("what is", "who is", "how much", "price", "where is")):
+        return not hist
+
+    # Follow-up context (last few turns)
+    if transcript:
+        recent = " ".join(m.get("text","") for m in transcript[-3:] if m.get("role")=="user").lower()
+        if any(m in recent for m in CURRENT_MARKERS) and not hist:
+            return True
+    return False
+
 
 
 async def web_lookup(query: str) -> str:
@@ -795,7 +870,7 @@ async def call_llm(session: Session, user_text: str) -> tuple:
     messages = build_messages(session)
 
     # Live web lookup for factual questions (phone, address, hours, weather…).
-    if needs_web_lookup(user_text):
+    if needs_web_lookup(user_text, session.transcript):
         facts = await web_lookup(user_text)
         if facts:
             log.info(f"[serper] facts for '{user_text[:40]}': {facts[:120]!r}")
