@@ -2124,7 +2124,6 @@ try {
     } catch(e) { console.error(e); }
   }
 
-  let currentVariants = [];
   function renderVariants() {
     const container = document.getElementById('variants-list');
     if (!container) return;
@@ -2286,6 +2285,17 @@ try {
       if (ov && ov.classList.contains('active')) loadOverview();
     }, 15000);
   }
+
+  // Expose all handler functions to the global scope so inline onclick=""
+  // attributes can find them. Because this whole script runs inside a try{}
+  // block, function declarations are block-scoped and would otherwise be
+  // invisible to inline handlers (making the whole UI non-clickable).
+  Object.assign(window, {
+    showSection, toggleTheme, toggleMobileSidebar, installPWA,
+    showCreateAdModal, createAd, editAd, saveAdEdit, toggleAd, deleteAd,
+    hideModal, addVariant, removeVariant, updateVariant, saveFrequency,
+    setToken
+  });
 
   init();
 } catch(e) {
