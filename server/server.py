@@ -185,13 +185,14 @@ def db_init():
             c.commit()
             log.info("[db] migrated: added ads.variants column")
 
-        # Seed ads from the hardcoded defaults only if the table is empty.
+        # NOTE: we no longer auto-seed from the hardcoded AD_DB default list.
+        # The SQLite DB is the single source of truth for ads.
+        # If the table is empty, no ads will play — the admin must add them via /admin.
+        # (Previous behavior re-seeded default ads after every disk wipe,
+        # which made it look like "ghost ads" were playing without admin control.)
         n = c.execute("SELECT COUNT(*) AS n FROM ads").fetchone()["n"]
         if n == 0:
-            for ad in AD_DB:
-                _db_upsert_ad(c, ad)
-            c.commit()
-            log.info(f"[db] seeded {len(AD_DB)} default ads into {DB_PATH}")
+            log.info("[db] ads table is empty — no ads loaded until added via /admin")
         else:
             # Load ads from DB as the source of truth.
             rows = c.execute("SELECT * FROM ads").fetchall()
@@ -608,6 +609,14 @@ Style rules:
 - Output only what you'd say aloud. No markdown, no bullet lists, no parentheses, no emojis.
 - If asked to be transferred, say you can't connect calls but can stay on the line and help.
 - Brief news snippets may be injected; acknowledge briefly if relevant or move on.
+
+CRITICAL ACCURACY RULE — NEVER HALLUCINATE CONTACT INFO:
+- You must NEVER invent, guess, or make up any phone number, address, zip code, business hours, website, or contact detail.
+- Only use exact information that was explicitly provided to you in the current conversation (from search results or the caller).
+- If the caller asks for a phone number, address, hours, or specific business contact and you do not have the exact verified details right in front of you, you MUST say something like:
+  "I don't have that exact information right now" or "I'm not finding the current phone number for that — do you have another way I can help?"
+- It is better to admit you don't have the info than to give a wrong number or address. Wrong contact details are harmful.
+- For other facts (weather, news, scores, prices, general knowledge), you can use reasonable information, but for anything that sounds like a phone, address, or specific local business contact, be extremely strict.
 """
 
 
@@ -712,7 +721,8 @@ CURRENT_MARKERS = ["today", "right now", "currently", "latest", "this week", "li
 
 def needs_web_lookup(text: str, transcript=None):
     """Smart trigger: search only for things that need fresh data.
-    Keeps cost low by skipping historical facts and pure conversation."""
+    Keeps cost low by skipping historical facts and pure conversation.
+    EXTRA AGGRESSIVE on anything that could lead to phone/address hallucination."""
     if not text: return False
     t = text.lower().strip()
 
@@ -722,9 +732,26 @@ def needs_web_lookup(text: str, transcript=None):
     if any(c in t for c in chit_chat):
         return False
 
-    # Business / local lookups — always search (core accuracy requirement)
-    if any(x in t for x in ("phone", "address", "hours", "open", "directions", "near me", "closest", "nearest")):
+    hist = any(h in t for h in HISTORICAL_SKIP)
+
+    # Very strong early block for historical questions (Abraham Lincoln style)
+    # These should never trigger expensive/current-data search.
+    historical_where = ("where did", "where was", "where does he live", "where did he", "where she lived")
+    if any(hq in t for hq in historical_where) or hist:
+        if any(h in t for h in ("lincoln", "washington", "president", "died", "lived", "built", "ancient", "history")) or hist:
+            return False
+
+    # Business / local / contact lookups — ALWAYS search (this is the most important accuracy case)
+    contact_patterns = ("phone", "number for", "the number", "call ", "address", "hours", "open", 
+                        "directions", "near me", "closest", "nearest", "located", "contact", 
+                        "zip code", "area code")
+    if any(x in t for x in contact_patterns):
         return True
+
+    # Explicit "where is" / "where's" for current locations/businesses only
+    if ("where is" in t or "where's" in t or "where can i" in t or "where to find" in t):
+        if not hist:
+            return True
 
     # Hard categories the user specified (news, sports, weather, stocks, product info)
     if any(p in t for p in MUST_SEARCH):
@@ -732,16 +759,15 @@ def needs_web_lookup(text: str, transcript=None):
 
     # Current-time language, but only if not clearly historical
     has_now = any(m in t for m in CURRENT_MARKERS)
-    hist = any(h in t for h in HISTORICAL_SKIP)
     if has_now and not hist:
         return True
 
-    # "what is / who is / where is" style questions:
+    # "what is / who is" style questions:
     # Only search if it smells like current/business info.
-    if any(b in t for b in ("what is", "who is", "how much", "price", "where is", "what are")):
+    if any(b in t for b in ("what is", "who is", "how much", "price", "what are")):
         if hist:
             return False
-        business_flavor = ("price", "cost", "open", "store", "company", "stock", "news", "game", "weather", "today", "now")
+        business_flavor = ("price", "cost", "open", "store", "company", "stock", "news", "game", "weather", "today", "now", "business", "restaurant", "store", "shop")
         if any(w in t for w in business_flavor):
             return True
         return False
@@ -839,6 +865,7 @@ async def call_llm(session: Session, user_text: str) -> tuple:
     messages = build_messages(session)
 
     # Live web lookup for factual questions (phone, address, hours, weather…).
+    facts = ""
     if needs_web_lookup(user_text, session.transcript):
         facts = await web_lookup(user_text)
         if facts:
@@ -846,14 +873,29 @@ async def call_llm(session: Session, user_text: str) -> tuple:
             messages.append({
                 "role": "system",
                 "content": (
-                    "Here is current, verified information from a Google search. "
-                    "Use ONLY these facts to answer — do not invent or alter phone "
-                    "numbers, addresses, or details. Read numbers naturally for "
-                    "speech (e.g. 'six one four, five five five, zero one two three'). "
-                    "If the answer isn't here, say you couldn't find it.\n\n"
-                    f"{facts}"
+                    "SEARCH RESULTS (use these EXACTLY — do not invent anything):\n"
+                    + facts + "\n\n"
+                    + "STRICT RULES FOR THIS RESPONSE:\n"
+                    + "- Use ONLY the exact facts above. Never add, guess, or invent any phone number, address, hours, zip code, or contact detail that is not written verbatim in the search results.\n"
+                    + "- If the caller asked for a phone number, address, or hours and it is NOT explicitly in the results above, you MUST respond with something like: \"I don't have the exact phone number for that right now\" or \"I'm not finding the current address — is there another way I can help?\" Do not make one up.\n"
+                    + "- For spoken numbers, read them naturally only if they appear exactly in the results (example: 'six one four, five five five, zero one two three').\n"
+                    + "- It is far better to say you couldn't find it than to give wrong contact information."
                 ),
             })
+
+    # Hard safety: if we decided a web lookup was needed for contact info
+    # but got nothing back, force the model to admit it instead of hallucinating.
+    if needs_web_lookup(user_text, session.transcript) and not facts:
+        messages.append({
+            "role": "system",
+            "content": (
+                "IMPORTANT: No verified search results were available for this query. "
+                "The caller is likely asking for a phone number, address, hours, or specific business contact. "
+                "You MUST NOT invent or guess any of those details. "
+                "Say clearly that you don't have the exact information right now and offer to help with something else. "
+                "Good responses: \"I don't have the current phone number for that\" or \"I'm not finding that address in my information — anything else I can help with?\""
+            )
+        })
 
     payload = {
         "model": LLM_MODEL,
