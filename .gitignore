@@ -16,3 +16,9 @@ env/
 
 # Logs
 *.log
+
+# Local SQLite DB
+data/
+*.db
+*.db-wal
+*.db-shm

@@ -134,6 +134,140 @@ play_counts: Dict[str, int] = defaultdict(int)
 total_revenue: float = 0.0
 impression_log: List[Dict[str, Any]] = []
 
+# ─── PERSISTENCE (SQLite) ─────────────────────────────────────────────────────
+# Durable storage for ads + impressions so play counts/revenue survive restarts.
+# On Render: attach a persistent disk and set DATABASE_PATH=/var/data/aivoice.db
+# Locally it defaults to ./data/aivoice.db.
+import sqlite3
+
+DB_PATH = os.environ.get(
+    "DATABASE_PATH",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "aivoice.db"),
+)
+_db_lock = threading.Lock()
+_db: Optional[sqlite3.Connection] = None
+
+
+def db_conn() -> sqlite3.Connection:
+    global _db
+    if _db is None:
+        os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+        _db = sqlite3.connect(DB_PATH, check_same_thread=False)
+        _db.row_factory = sqlite3.Row
+        _db.execute("PRAGMA journal_mode=WAL;")
+    return _db
+
+
+def db_init():
+    """Create tables, seed ads on first run, then hydrate in-memory state."""
+    with _db_lock:
+        c = db_conn()
+        c.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS ads (
+                id TEXT PRIMARY KEY, sponsor TEXT, industry TEXT, keywords TEXT,
+                script TEXT, cta TEXT, bid_cpm REAL, daily_cap INTEGER,
+                weight REAL, active INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS impressions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, ad_id TEXT, session_id TEXT,
+                caller_id TEXT, sponsor TEXT, bid_cpm REAL, revenue_usd REAL,
+                ts REAL, date TEXT
+            );
+            """
+        )
+        c.commit()
+
+        # Seed ads from the hardcoded defaults only if the table is empty.
+        n = c.execute("SELECT COUNT(*) AS n FROM ads").fetchone()["n"]
+        if n == 0:
+            for ad in AD_DB:
+                _db_upsert_ad(c, ad)
+            c.commit()
+            log.info(f"[db] seeded {len(AD_DB)} default ads into {DB_PATH}")
+        else:
+            # Load ads from DB as the source of truth.
+            rows = c.execute("SELECT * FROM ads").fetchall()
+            AD_DB.clear()
+            for r in rows:
+                AD_DB.append({
+                    "id": r["id"], "sponsor": r["sponsor"], "industry": r["industry"],
+                    "keywords": json.loads(r["keywords"] or "[]"), "script": r["script"],
+                    "cta": r["cta"], "bid_cpm": r["bid_cpm"], "daily_cap": r["daily_cap"],
+                    "weight": r["weight"], "active": bool(r["active"]),
+                })
+            log.info(f"[db] loaded {len(AD_DB)} ads from {DB_PATH}")
+
+        # Hydrate play counts + revenue + recent impression log from history.
+        global total_revenue
+        for row in c.execute(
+            "SELECT ad_id, COUNT(*) AS n FROM impressions GROUP BY ad_id"
+        ).fetchall():
+            play_counts[row["ad_id"]] = row["n"]
+        rev = c.execute("SELECT COALESCE(SUM(revenue_usd),0) AS s FROM impressions").fetchone()["s"]
+        total_revenue = float(rev or 0.0)
+        for row in c.execute(
+            "SELECT * FROM impressions ORDER BY id DESC LIMIT 100"
+        ).fetchall():
+            impression_log.append({
+                "ad_id": row["ad_id"], "session_id": row["session_id"],
+                "caller_id": row["caller_id"], "sponsor": row["sponsor"],
+                "bid_cpm": row["bid_cpm"], "revenue_usd": row["revenue_usd"],
+                "ts": row["ts"], "date": row["date"],
+            })
+        impression_log.reverse()  # keep chronological order
+        log.info(
+            f"[db] hydrated plays={sum(play_counts.values())} "
+            f"revenue=${total_revenue:.2f} impressions={len(impression_log)}"
+        )
+
+
+def _db_upsert_ad(c: sqlite3.Connection, ad: Dict[str, Any]):
+    c.execute(
+        """INSERT INTO ads (id,sponsor,industry,keywords,script,cta,bid_cpm,daily_cap,weight,active)
+           VALUES (?,?,?,?,?,?,?,?,?,?)
+           ON CONFLICT(id) DO UPDATE SET sponsor=excluded.sponsor,industry=excluded.industry,
+             keywords=excluded.keywords,script=excluded.script,cta=excluded.cta,
+             bid_cpm=excluded.bid_cpm,daily_cap=excluded.daily_cap,weight=excluded.weight,
+             active=excluded.active""",
+        (
+            ad["id"], ad.get("sponsor"), ad.get("industry"),
+            json.dumps(ad.get("keywords", [])), ad.get("script"), ad.get("cta"),
+            ad.get("bid_cpm", 0.0), ad.get("daily_cap", 100),
+            ad.get("weight", 1.0), 1 if ad.get("active", True) else 0,
+        ),
+    )
+
+
+def db_save_ad(ad: Dict[str, Any]):
+    with _db_lock:
+        c = db_conn()
+        _db_upsert_ad(c, ad)
+        c.commit()
+
+
+def db_delete_ad(ad_id: str):
+    with _db_lock:
+        c = db_conn()
+        c.execute("DELETE FROM ads WHERE id=?", (ad_id,))
+        c.commit()
+
+
+def db_insert_impression(record: Dict[str, Any]):
+    with _db_lock:
+        c = db_conn()
+        c.execute(
+            """INSERT INTO impressions (ad_id,session_id,caller_id,sponsor,bid_cpm,revenue_usd,ts,date)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            (
+                record.get("ad_id"), record.get("session_id"), record.get("caller_id"),
+                record.get("sponsor"), record.get("bid_cpm"), record.get("revenue_usd"),
+                record.get("ts"), record.get("date"),
+            ),
+        )
+        c.commit()
+
+
 # Admin dashboard auth — set ADMIN_TOKEN in Render to a long random string.
 ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
 
@@ -297,6 +431,7 @@ def record_play(ad_id: str, session_id: str, caller_id: Optional[str]):
         "date": datetime.now(timezone.utc).isoformat(),
     }
     impression_log.append(record)
+    db_insert_impression(record)
     log.info(
         f"[ad] play #{play_counts[ad_id]} sponsor={record['sponsor']} "
         f"revenue +${rev:.4f} day=${total_revenue:.2f}"
@@ -1138,6 +1273,7 @@ async def create_ad(payload: AdPayload, x_admin_token: Optional[str] = Header(de
         "active": True,
     }
     AD_DB.append(new_ad)
+    db_save_ad(new_ad)
     return {"ok": True, "ad": new_ad}
 
 
@@ -1148,6 +1284,7 @@ async def toggle_ad(ad_id: str, x_admin_token: Optional[str] = Header(default=No
     if not ad:
         raise HTTPException(404, "Ad not found")
     ad["active"] = not ad["active"]
+    db_save_ad(ad)
     return {"ok": True, "ad": ad}
 
 
@@ -1157,6 +1294,7 @@ async def delete_ad(ad_id: str, x_admin_token: Optional[str] = Header(default=No
     global AD_DB
     AD_DB = [a for a in AD_DB if a["id"] != ad_id]
     play_counts.pop(ad_id, None)
+    db_delete_ad(ad_id)
     return {"ok": True}
 
 
@@ -1340,6 +1478,14 @@ async function addAd(){
 if(TOK) load();
 </script>
 </body></html>"""
+
+
+@app.on_event("startup")
+async def _on_startup():
+    try:
+        db_init()
+    except Exception as exc:
+        log.error(f"[db] init failed: {exc} — running with in-memory state only")
 
 
 if __name__ == "__main__":
