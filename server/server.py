@@ -2261,7 +2261,18 @@ try {
     else currentVariants[idx].script = value;
   }
 
-  async function editAd(id) {
+  async async function setAdPlacement(id, val, sel){
+  try{
+    if(sel) sel.disabled = true;
+    await api('/admin/ads/' + id, 'PUT', { placement: val });
+    if(sel){ sel.disabled = false; sel.style.borderColor = '#4caf50'; }
+  }catch(e){
+    if(sel) sel.disabled = false;
+    alert('Could not save placement: ' + e);
+  }
+}
+
+function editAd(id) {
     try {
       const stats = await api('/admin/stats');
       const ad = (stats.ads || []).find(a => a.id === id);
@@ -2272,6 +2283,7 @@ try {
         <div class="space-y-4 text-sm">
           <div><label class="text-xs text-slate-400">Sponsor</label><input id="m-sponsor" value="${ad.sponsor || ''}" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2.5"></div>
           <div><label class="text-xs text-slate-400">Main Script</label><textarea id="m-script" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2.5 h-20">${ad.script || ''}</textarea></div>
+<div style="margin:8px 0"><label style="display:block;font-size:12px;opacity:.8;margin-bottom:4px">Ad placement</label><select id="m-placement" onchange="setAdPlacement('${ad.id}', this.value, this)" style="width:100%;padding:6px;border-radius:6px"><option value="none"${(ad.placement||'none')==='none'?' selected':''}>None (keyword-matched)</option><option value="start"${ad.placement==='start'?' selected':''}>Start of call</option><option value="post_search"${ad.placement==='post_search'?' selected':''}>After web search</option></select></div>
           <div class="grid grid-cols-2 gap-3">
             <div><label class="text-xs text-slate-400">Bid CPM</label><input id="m-bid" type="number" step="0.5" value="${ad.bid_cpm || 0}" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2.5"></div>
             <div><label class="text-xs text-slate-400">Daily Cap</label><input id="m-cap" type="number" value="${ad.daily_cap || 100}" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2.5"></div>
