@@ -146,7 +146,7 @@ DB_PATH = os.environ.get(
     "DATABASE_PATH",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "aivoice.db"),
 )
-_db_lock = threading.Lock()
+_db_lock = threading.RLock()
 _db: Optional[sqlite3.Connection] = None
 
 
@@ -312,9 +312,7 @@ def db_insert_impression(record: Dict[str, Any]):
                 record.get("ts"), record.get("date"),
             ),
         )
-
-
-# Admin dashboard auth — set ADMIN_TOKEN in Render to a long random string.        c.commit()
+        c.commit()
 
 
 # Admin dashboard auth — set ADMIN_TOKEN in Render to a long random string.
