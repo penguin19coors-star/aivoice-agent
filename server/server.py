@@ -2129,6 +2129,7 @@ ADMIN_HTML = """<!doctype html>
           </div>
           <button onclick="saveFrequency()" class="w-full py-3 bg-emerald-600 hover:bg-emerald-500 rounded-2xl font-medium">Save Frequency Settings</button>
           <div id="freq-status" class="text-center text-sm text-emerald-400 h-5"></div>
+<div style="margin-top:16px;border-top:1px solid #444;padding-top:12px"><label style="display:block;font-size:13px;margin-bottom:6px">Ad intro sound &mdash; an MP3 that plays before every ad</label><input type="file" id="cue-file" accept="audio/*" style="font-size:12px"><button onclick="uploadAdCue()" style="padding:6px 12px;margin-left:6px">Upload</button><button onclick="removeAdCue()" style="padding:6px 12px;margin-left:6px">Remove</button></div>
         </div>
       </div>
 
@@ -2486,6 +2487,8 @@ try {
   // block, function declarations are block-scoped and would otherwise be
   // invisible to inline handlers (making the whole UI non-clickable).
   Object.assign(window, {
+  uploadAdCue: function(){ var el=document.getElementById('cue-file'); var f=el&&el.files&&el.files[0]; if(!f){ alert('Choose an MP3 file first.'); return; } var rd=new FileReader(); rd.onload=function(){ var b64=String(rd.result).split(',')[1]; api('/admin/ad-cue','POST',{mp3_b64:b64}).then(function(){ alert('Cue uploaded. It will play before every ad.'); }).catch(function(e){ alert('Upload failed: '+e); }); }; rd.readAsDataURL(f); },
+  removeAdCue: function(){ if(!confirm('Remove the ad intro sound?')) return; api('/admin/ad-cue','DELETE').then(function(){ alert('Removed.'); }).catch(function(e){ alert('Remove failed: '+e); }); },
   setAdPlacement: async function(id, val, sel){ try { if (sel) sel.disabled = true; await api('/admin/ads/' + id, 'PUT', { placement: val }); if (sel) { sel.disabled = false; sel.style.borderColor = '#4caf50'; } } catch (e) { if (sel) sel.disabled = false; alert('Could not save placement: ' + e); } },
     showSection, toggleTheme, toggleMobileSidebar, installPWA,
     showCreateAdModal, createAd, editAd, saveAdEdit, toggleAd, deleteAd,
