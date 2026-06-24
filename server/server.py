@@ -564,6 +564,18 @@ def pick_ad_script(ad: Dict[str, Any], session: Session) -> str:
 _placement_rotation: Dict[str, int] = {}
 
 
+_start_variant_rotation: Dict[str, int] = {}
+
+
+def pick_start_script(ad):
+    pool = [v for v in ad.get("variants", []) if v.get("start_enabled", True) and v.get("script")]
+    if not pool:
+        return ad.get("script", "")
+    i = _start_variant_rotation.get(ad["id"], 0) % len(pool)
+    _start_variant_rotation[ad["id"]] = i + 1
+    return pool[i].get("script", "")
+
+
 def pick_placement_ad(placement: str) -> Optional[Dict[str, Any]]:
     pool = [a for a in AD_DB if a.get("active", True) and a.get("placement", "none") == placement]
     if not pool:
@@ -584,7 +596,9 @@ def play_placement_ad_lines(session: Session, placement: str) -> Optional[str]:
     session.ad_play_times.append(now)
     record_play(ad["id"], session.session_id, session.caller_id)
     session.metadata["pending_ad_id"] = ad["id"]
-    return pick_ad_script(ad, session)
+    if placement == "start":
+        return pick_start_script(ad)
+    return pick_ad_script({**ad, "variants": [v for v in ad.get("variants", []) if v.get("other_enabled", True)]}, session)
 
 
 def maybe_inject_ad(session: Session) -> Optional[str]:
@@ -596,7 +610,7 @@ def maybe_inject_ad(session: Session) -> Optional[str]:
         session.ad_play_times.append(now)   # for rolling window frequency control
         record_play(ad["id"], session.session_id, session.caller_id)
         session.metadata["pending_ad_id"] = ad["id"]
-        return pick_ad_script(ad, session)
+        return pick_ad_script({**ad, "variants": [v for v in ad.get("variants", []) if v.get("other_enabled", True)]}, session)
     return None
 
 def build_post_ad_bridge(last_user_text: str) -> str:
@@ -1782,6 +1796,8 @@ async def send_tts(ws: WebSocket, stream_sid: str, text: str):
 class AdVariant(BaseModel):
     keywords: List[str] = []
     script: str = ""
+    start_enabled: bool = True
+    other_enabled: bool = True
 
 
 class AdPayload(BaseModel):
