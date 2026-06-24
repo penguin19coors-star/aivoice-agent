@@ -359,20 +359,38 @@ function adModal(ad){
     +'<div class="three"><div class="field"><label>Bid /1k</label><input type="number" step="0.01" id="f_bid" value="'+(ad.bid_cpm!=null?ad.bid_cpm:0)+'"></div>'
     +'<div class="field"><label>Daily cap</label><input type="number" id="f_cap" value="'+(ad.daily_cap!=null?ad.daily_cap:100)+'"></div>'
     +'<div class="field"><label>Weight</label><input type="number" step="0.1" id="f_weight" value="'+(ad.weight!=null?ad.weight:1)+'"></div></div>'
-    +'<div class="field"><label>Variants (optional A/B scripts)</label><div id="varList"></div><button class="btn sm" id="addVar" type="button">+ Add variant</button></div>'
+    +'<div class="field"><label>Variants (optional A/B scripts)</label><div class="hint" style="margin:-2px 0 8px;">Each variant can be toggled for Start-of-call (rotated in turn) and/or used elsewhere.</div><div id="varList"></div><button class="btn sm" id="addVar" type="button">+ Add variant</button></div>'
+    +(isEdit?('<div class="field"><label>Outro sound &mdash; plays right after this ad'+(ad.outro_set?' (<span style="color:var(--green)">set</span>)':'')+'</label><input type="file" id="f_outro" accept="audio/mpeg,audio/*"><div class="row" style="margin-top:8px;gap:8px;"><button class="btn sm" type="button" id="outroUp">Upload outro</button>'+(ad.outro_set?'<button class="btn sm red" type="button" id="outroRm">Remove outro</button>':'')+'</div></div>'):'')
     +'<div class="modal-actions"><button class="btn" id="cancelBtn">Cancel</button><button class="btn primary" id="saveBtn">'+(isEdit?"Save changes":"Create ad")+'</button></div>';
   openModal(html);
   vars.forEach(addVariantRow);
   $("addVar").onclick=function(){ addVariantRow({keywords:[],script:""}); };
   $("cancelBtn").onclick=closeModal;
   $("saveBtn").onclick=function(){ saveAd(isEdit?ad.id:null); };
+  if(isEdit){
+    var ou=$("outroUp"); if(ou) ou.onclick=function(){ uploadOutro(ad.id); };
+    var orm=$("outroRm"); if(orm) orm.onclick=function(){ api("/admin/ads/"+encodeURIComponent(ad.id)+"/outro","DELETE").then(function(){ toast("Outro removed"); STATS=null; if(orm)orm.remove(); }).catch(function(e){ toast("Failed: "+e.message); }); };
+  }
+}
+function uploadOutro(id){
+  var el=$("f_outro"); var f=el&&el.files&&el.files[0];
+  if(!f){ toast("Choose an MP3 first"); return; }
+  var b=$("outroUp"); b.disabled=true; b.textContent="Uploading…";
+  var rd=new FileReader();
+  rd.onload=function(){
+    var b64=String(rd.result).split(",")[1];
+    api("/admin/ads/"+encodeURIComponent(id)+"/outro","POST",{ mp3_b64:b64 }).then(function(){ b.disabled=false; b.textContent="Upload outro"; toast("Outro saved"); STATS=null; })
+      .catch(function(e){ b.disabled=false; b.textContent="Upload outro"; toast("Failed: "+e.message); });
+  };
+  rd.readAsDataURL(f);
 }
 function addVariantRow(v){
   v=v||{keywords:[],script:""};
   var wrap=document.createElement("div"); wrap.className="variant";
   wrap.innerHTML='<div class="between"><span class="dim">Variant</span><button class="vrm" type="button">remove</button></div>'
     +'<div class="field" style="margin-bottom:8px;"><input type="text" class="v_kw" value="'+esc((v.keywords||[]).join(", "))+'" placeholder="keywords (comma separated)"></div>'
-    +'<textarea class="v_sc" placeholder="variant script">'+esc(v.script||"")+'</textarea>';
+    +'<textarea class="v_sc" placeholder="variant script">'+esc(v.script||"")+'</textarea>'
+    +'<div class="row" style="gap:18px;margin-top:8px;font-size:12px;color:var(--muted);flex-wrap:wrap;"><label class="row" style="gap:6px;cursor:pointer;"><input type="checkbox" class="v_start"'+((v.start_enabled!==false)?" checked":"")+'> Use for Start of call</label><label class="row" style="gap:6px;cursor:pointer;"><input type="checkbox" class="v_other"'+((v.other_enabled!==false)?" checked":"")+'> Use elsewhere</label></div>';
   wrap.querySelector(".vrm").onclick=function(){ wrap.remove(); };
   $("varList").appendChild(wrap);
 }
@@ -381,7 +399,7 @@ function collectVariants(){
   document.querySelectorAll("#varList .variant").forEach(function(w){
     var kw=w.querySelector(".v_kw").value.split(",").map(function(s){return s.trim();}).filter(Boolean);
     var sc=w.querySelector(".v_sc").value.trim();
-    if(sc) out.push({ keywords:kw, script:sc });
+    if(sc) out.push({ keywords:kw, script:sc, start_enabled:!!w.querySelector(".v_start").checked, other_enabled:!!w.querySelector(".v_other").checked });
   });
   return out;
 }
