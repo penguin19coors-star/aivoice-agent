@@ -380,6 +380,7 @@ class Session:
     topic_extract: Dict[str, float] = field(default_factory=dict)
     ads_played: List[str] = field(default_factory=list)
     last_ad_at: float = 0.0
+    ad_play_times: List[float] = field(default_factory=list)  # ad play timestamps for rolling-window frequency
     created_at: float = field(default_factory=time.time)
     ended_at: Optional[float] = None
     metadata: Dict = field(default_factory=dict)
