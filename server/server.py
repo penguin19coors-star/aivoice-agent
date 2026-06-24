@@ -2261,18 +2261,7 @@ try {
     else currentVariants[idx].script = value;
   }
 
-  async async function setAdPlacement(id, val, sel){
-  try{
-    if(sel) sel.disabled = true;
-    await api('/admin/ads/' + id, 'PUT', { placement: val });
-    if(sel){ sel.disabled = false; sel.style.borderColor = '#4caf50'; }
-  }catch(e){
-    if(sel) sel.disabled = false;
-    alert('Could not save placement: ' + e);
-  }
-}
-
-function editAd(id) {
+  async function editAd(id) {
     try {
       const stats = await api('/admin/stats');
       const ad = (stats.ads || []).find(a => a.id === id);
@@ -2425,6 +2414,11 @@ function editAd(id) {
   console.error('Dashboard failed:', e);
   alert('Dashboard error. Hard refresh and redeploy. ' + e.message);
 }
+
+window.setAdPlacement = async function(id, val, sel){
+  try { if (sel) sel.disabled = true; await api('/admin/ads/' + id, 'PUT', { placement: val }); if (sel) { sel.disabled = false; sel.style.borderColor = '#4caf50'; } }
+  catch (e) { if (sel) sel.disabled = false; alert('Could not save placement: ' + e); }
+};
 </script>
 </body>
 </html>
