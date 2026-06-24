@@ -16,6 +16,7 @@ import html
 import asyncio
 import threading
 import audioop
+import base64 as _b64
 try:
     import miniaudio
 except Exception:
