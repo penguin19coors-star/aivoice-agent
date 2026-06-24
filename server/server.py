@@ -583,6 +583,7 @@ def play_placement_ad_lines(session: Session, placement: str) -> Optional[str]:
     session.last_ad_at = now
     session.ad_play_times.append(now)
     record_play(ad["id"], session.session_id, session.caller_id)
+    session.metadata["pending_ad_id"] = ad["id"]
     return pick_ad_script(ad, session)
 
 
@@ -594,6 +595,7 @@ def maybe_inject_ad(session: Session) -> Optional[str]:
         session.last_ad_at = now
         session.ad_play_times.append(now)   # for rolling window frequency control
         record_play(ad["id"], session.session_id, session.caller_id)
+        session.metadata["pending_ad_id"] = ad["id"]
         return pick_ad_script(ad, session)
     return None
 
@@ -796,6 +798,26 @@ AD_BREAK_CUE = os.environ.get("AD_BREAK_CUE", "And now, a quick word from our sp
 
 AD_CUE_PATH = os.path.join(os.environ.get("DATA_DIR", "/var/data"), "ad_cue.ulaw")
 AD_CUE_ULAW: Optional[bytes] = None
+AD_OUTRO_DIR = os.environ.get("DATA_DIR", "/var/data")
+AD_OUTRO_ULAW: Dict[str, bytes] = {}
+
+
+def _ad_outro_path(ad_id):
+    safe = re.sub(r"[^A-Za-z0-9_-]", "", ad_id or "")
+    return os.path.join(AD_OUTRO_DIR, "ad_outro_" + safe + ".ulaw")
+
+
+def load_ad_outros():
+    import glob
+    AD_OUTRO_ULAW.clear()
+    try:
+        for p in glob.glob(os.path.join(AD_OUTRO_DIR, "ad_outro_*.ulaw")):
+            base = os.path.basename(p)[len("ad_outro_"):-len(".ulaw")]
+            with open(p, "rb") as f:
+                AD_OUTRO_ULAW[base] = f.read()
+        log.info(f"[cue] loaded {len(AD_OUTRO_ULAW)} ad outro(s)")
+    except Exception as e:
+        log.warning(f"[cue] outro load failed: {e}")
 
 
 def _decode_audio_to_ulaw(data: bytes) -> bytes:
@@ -1357,7 +1379,7 @@ async def telnyx_websocket_endpoint(websocket: WebSocket):
     awaiting_start = True
     _b64 = __import__("base64")
 
-    async def _send_outbound(text: str, voice_id: Optional[str] = None, raw_ulaw: Optional[bytes] = None):
+    async def _send_outbound(text: str, voice_id: Optional[str] = None, raw_ulaw: Optional[bytes] = None, prefix_ulaw: Optional[bytes] = None, suffix_ulaw: Optional[bytes] = None):
         nonlocal stream_id
         if not stream_id:
             return
@@ -1369,8 +1391,12 @@ async def telnyx_websocket_endpoint(websocket: WebSocket):
         if raw_ulaw is not None:
             outbound_buffer.extend(raw_ulaw)
         else:
+            if prefix_ulaw:
+                outbound_buffer.extend(prefix_ulaw)
             async for chunk in _cartesia_ulaw_stream(text, voice_id=voice_id):
                 outbound_buffer.extend(chunk)
+            if suffix_ulaw:
+                outbound_buffer.extend(suffix_ulaw)
         if not outbound_buffer:
             return
         session.is_speaking = True
@@ -1459,9 +1485,7 @@ async def telnyx_websocket_endpoint(websocket: WebSocket):
                     async def _intro():
                         start_ad = play_placement_ad_lines(session, "start")
                         if start_ad:
-                            if AD_CUE_ULAW:
-                                await _send_outbound("", raw_ulaw=AD_CUE_ULAW)
-                            await _send_outbound(start_ad, (CARTESIA_AD_VOICE or None))
+                            await _send_outbound(start_ad, (CARTESIA_AD_VOICE or None), suffix_ulaw=AD_OUTRO_ULAW.get(session.metadata.get("pending_ad_id")))
                         await _send_outbound(greeting)
                     asyncio.create_task(_intro())
 
@@ -1709,9 +1733,7 @@ async def _handle_utterance(utterance: bytes, session: Session, ws: WebSocket, s
             if did_search:
                 ps_ad = play_placement_ad_lines(session, "post_search")
                 if ps_ad:
-                    if AD_CUE_ULAW:
-                        await send_fn("", raw_ulaw=AD_CUE_ULAW)
-                    await send_fn(ps_ad, (CARTESIA_AD_VOICE or None))
+                    await send_fn(ps_ad, (CARTESIA_AD_VOICE or None), prefix_ulaw=(AD_CUE_ULAW or None), suffix_ulaw=AD_OUTRO_ULAW.get(session.metadata.get("pending_ad_id")))
             if reply:
                 await send_fn(reply)
 
@@ -1719,9 +1741,7 @@ async def _handle_utterance(utterance: bytes, session: Session, ws: WebSocket, s
                 # Pre-ad cue so the caller knows a sponsor message is coming
 
                 # The actual ad script (separate voice)
-                if AD_CUE_ULAW:
-                    await send_fn("", raw_ulaw=AD_CUE_ULAW)
-                await send_fn(ad_line, (CARTESIA_AD_VOICE or None))
+                await send_fn(ad_line, (CARTESIA_AD_VOICE or None), prefix_ulaw=(AD_CUE_ULAW or None), suffix_ulaw=AD_OUTRO_ULAW.get(session.metadata.get("pending_ad_id")))
 
                 # Post-ad bridge: re-engage with the original question to keep
                 # momentum, especially useful for search / factual conversations.
@@ -1859,6 +1879,7 @@ async def admin_stats(x_admin_token: Optional[str] = Header(default=None)):
             "script": ad.get("script", ""),
             "variants": ad.get("variants", []),
             "placement": ad.get("placement", "none"),
+            "outro_set": ad["id"] in AD_OUTRO_ULAW,
             "plays": plays,
             "revenue_usd": round(plays * ad["bid_cpm"] / 1000.0, 4),
         })
@@ -1948,6 +1969,41 @@ async def remove_ad_cue(x_admin_token: Optional[str] = Header(default=None)):
     return {"ok": True}
 
 
+@app.post("/admin/ads/{ad_id}/outro")
+async def upload_ad_outro(ad_id: str, payload: dict, x_admin_token: Optional[str] = Header(default=None)):
+    check_admin(x_admin_token)
+    b64 = (payload.get("mp3_b64") or payload.get("b64") or "").strip()
+    if "," in b64 and b64[:5].lower() == "data:":
+        b64 = b64.split(",", 1)[1]
+    b64 = re.sub(r"\s+", "", b64).replace("-", "+").replace("_", "/")
+    if len(b64) % 4:
+        b64 += "=" * (4 - len(b64) % 4)
+    try:
+        raw = _b64.b64decode(b64)
+    except Exception as e:
+        raise HTTPException(400, f"invalid base64 audio: {e}")
+    try:
+        ulaw = _decode_audio_to_ulaw(raw)
+    except Exception as e:
+        raise HTTPException(400, f"could not decode audio: {e}")
+    os.makedirs(AD_OUTRO_DIR, exist_ok=True)
+    with open(_ad_outro_path(ad_id), "wb") as f:
+        f.write(ulaw)
+    AD_OUTRO_ULAW[ad_id] = ulaw
+    return {"ok": True, "seconds": round(len(ulaw) / 8000.0, 2)}
+
+
+@app.delete("/admin/ads/{ad_id}/outro")
+async def delete_ad_outro(ad_id: str, x_admin_token: Optional[str] = Header(default=None)):
+    check_admin(x_admin_token)
+    AD_OUTRO_ULAW.pop(ad_id, None)
+    try:
+        os.remove(_ad_outro_path(ad_id))
+    except FileNotFoundError:
+        pass
+    return {"ok": True}
+
+
 @app.get("/icon-192.png")
 async def icon_192():
     return Response(content=ICON_192, media_type="image/png", headers={"Cache-Control": "public, max-age=86400"})
@@ -1979,6 +2035,25 @@ async def admin_dashboard():
 
 
 # ─── PWA SUPPORT (installable as app) ──────────────────────────────────────────
+@app.get("/manifest.json")
+async def app_manifest():
+    return JSONResponse({
+        "name": "Ad Console",
+        "short_name": "Ad Console",
+        "description": "Manage ads, placement, frequency and intro/outro sounds",
+        "start_url": "/admin",
+        "display": "standalone",
+        "background_color": "#10141a",
+        "theme_color": "#10141a",
+        "icons": [
+            {"src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
+            {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any"},
+            {"src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "maskable"},
+            {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"},
+        ],
+    }, media_type="application/manifest+json")
+
+
 @app.get("/manifest.json")
 async def pwa_manifest():
     return {
@@ -2043,6 +2118,7 @@ async def _on_startup():
     try:
         db_init()
         load_ad_cue()
+        load_ad_outros()
     except Exception as exc:
         log.error(f"[db] init failed: {exc} — running with in-memory state only")
 
