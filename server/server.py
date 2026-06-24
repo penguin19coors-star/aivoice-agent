@@ -1913,12 +1913,15 @@ async def update_settings(payload: dict, x_admin_token: Optional[str] = Header(d
 async def upload_ad_cue(payload: dict, x_admin_token: Optional[str] = Header(default=None)):
     check_admin(x_admin_token)
     b64 = (payload.get("mp3_b64") or payload.get("b64") or "").strip()
-    if b64.startswith("data:") and "," in b64:
+    if "," in b64 and b64[:5].lower() == "data:":
         b64 = b64.split(",", 1)[1]
+    b64 = re.sub(r"\s+", "", b64).replace("-", "+").replace("_", "/")
+    if len(b64) % 4:
+        b64 += "=" * (4 - len(b64) % 4)
     try:
         raw = _b64.b64decode(b64)
-    except Exception:
-        raise HTTPException(400, "invalid base64 audio")
+    except Exception as e:
+        raise HTTPException(400, f"invalid base64 audio: {e}")
     if not raw:
         raise HTTPException(400, "empty audio")
     try:
