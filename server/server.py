@@ -2403,6 +2403,7 @@ try {
   // block, function declarations are block-scoped and would otherwise be
   // invisible to inline handlers (making the whole UI non-clickable).
   Object.assign(window, {
+  setAdPlacement: async function(id, val, sel){ try { if (sel) sel.disabled = true; await api('/admin/ads/' + id, 'PUT', { placement: val }); if (sel) { sel.disabled = false; sel.style.borderColor = '#4caf50'; } } catch (e) { if (sel) sel.disabled = false; alert('Could not save placement: ' + e); } },
     showSection, toggleTheme, toggleMobileSidebar, installPWA,
     showCreateAdModal, createAd, editAd, saveAdEdit, toggleAd, deleteAd,
     hideModal, addVariant, removeVariant, updateVariant, saveFrequency,
@@ -2415,10 +2416,7 @@ try {
   alert('Dashboard error. Hard refresh and redeploy. ' + e.message);
 }
 
-window.setAdPlacement = async function(id, val, sel){
-  try { if (sel) sel.disabled = true; await api('/admin/ads/' + id, 'PUT', { placement: val }); if (sel) { sel.disabled = false; sel.style.borderColor = '#4caf50'; } }
-  catch (e) { if (sel) sel.disabled = false; alert('Could not save placement: ' + e); }
-};
+
 </script>
 </body>
 </html>
