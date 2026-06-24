@@ -1410,7 +1410,6 @@ async def telnyx_websocket_endpoint(websocket: WebSocket):
                     async def _intro():
                         start_ad = play_placement_ad_lines(session, "start")
                         if start_ad:
-                            await _send_outbound(AD_BREAK_CUE, (CARTESIA_AD_VOICE or None))
                             await _send_outbound(start_ad, (CARTESIA_AD_VOICE or None))
                         await _send_outbound(greeting)
                     asyncio.create_task(_intro())
@@ -1659,15 +1658,12 @@ async def _handle_utterance(utterance: bytes, session: Session, ws: WebSocket, s
             if did_search:
                 ps_ad = play_placement_ad_lines(session, "post_search")
                 if ps_ad:
-                    await send_fn(AD_BREAK_CUE, (CARTESIA_AD_VOICE or None))
                     await send_fn(ps_ad, (CARTESIA_AD_VOICE or None))
             if reply:
                 await send_fn(reply)
 
             if ad_line:
                 # Pre-ad cue so the caller knows a sponsor message is coming
-                cue = AD_BREAK_CUE
-                await send_fn(cue, (CARTESIA_AD_VOICE or None))
 
                 # The actual ad script (separate voice)
                 await send_fn(ad_line, (CARTESIA_AD_VOICE or None))
@@ -1683,8 +1679,6 @@ async def _handle_utterance(utterance: bytes, session: Session, ws: WebSocket, s
             if reply:
                 await send_tts(ws, stream_sid, reply)
             if ad_line:
-                cue = AD_BREAK_CUE
-                await send_tts(ws, stream_sid, cue)
                 await send_tts(ws, stream_sid, ad_line)
                 bridge = build_post_ad_bridge(transcript)
                 if bridge:
