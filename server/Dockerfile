@@ -3,7 +3,7 @@ FROM python:3.12-slim
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY server.py .
+COPY server.py admin_dashboard.html icon-192.png icon-512.png ./
 
 # Render sets PORT env; default to 8000
 ENV PORT=8000
