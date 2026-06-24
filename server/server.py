@@ -212,6 +212,12 @@ def db_init():
             c.commit()
             log.info("[db] migrated: added ads.variants column")
 
+        # --- migration: add placement column to ads if missing ---
+        try:
+            c.execute("ALTER TABLE ads ADD COLUMN placement TEXT DEFAULT 'none'")
+            c.commit()
+        except Exception:
+            pass
         # NOTE: we no longer auto-seed from the hardcoded AD_DB default list.
         # The SQLite DB is the single source of truth for ads.
         # If the table is empty, no ads will play — the admin must add them via /admin.
@@ -226,6 +232,7 @@ def db_init():
             AD_DB.clear()
             for r in rows:
                 AD_DB.append({
+                    "placement": (r["placement"] if "placement" in r.keys() else "none"),
                     "id": r["id"], "sponsor": r["sponsor"], "industry": r["industry"],
                     "keywords": json.loads(r["keywords"] or "[]"), "script": r["script"],
                     "cta": r["cta"], "bid_cpm": r["bid_cpm"], "daily_cap": r["daily_cap"],
@@ -270,18 +277,19 @@ def db_init():
 
 def _db_upsert_ad(c: sqlite3.Connection, ad: Dict[str, Any]):
     c.execute(
-        """INSERT INTO ads (id,sponsor,industry,keywords,script,cta,bid_cpm,daily_cap,weight,active,variants)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?)
+        """INSERT INTO ads (id,sponsor,industry,keywords,script,cta,bid_cpm,daily_cap,weight,active,variants,placement)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
            ON CONFLICT(id) DO UPDATE SET sponsor=excluded.sponsor,industry=excluded.industry,
              keywords=excluded.keywords,script=excluded.script,cta=excluded.cta,
              bid_cpm=excluded.bid_cpm,daily_cap=excluded.daily_cap,weight=excluded.weight,
-             active=excluded.active,variants=excluded.variants""",
+             active=excluded.active,variants=excluded.variants,placement=excluded.placement""",
         (
             ad["id"], ad.get("sponsor"), ad.get("industry"),
             json.dumps(ad.get("keywords", [])), ad.get("script"), ad.get("cta"),
             ad.get("bid_cpm", 0.0), ad.get("daily_cap", 100),
             ad.get("weight", 1.0), 1 if ad.get("active", True) else 0,
             json.dumps(ad.get("variants", [])),
+            ad.get("placement", "none"),
         ),
     )
 
@@ -470,6 +478,8 @@ def select_ad(session: Session) -> Optional[Dict[str, Any]]:
 
     candidates = []
     for ad in AD_DB:
+        if ad.get("placement", "none") != "none":
+            continue  # placement ads play at their trigger, not by keyword
         if not ad["active"]:
             continue
         if play_counts[ad["id"]] >= ad["daily_cap"]:
@@ -544,6 +554,31 @@ def pick_ad_script(ad: Dict[str, Any], session: Session) -> str:
             best_hits = hits
             best_script = v.get("script") or ad["script"]
     return best_script
+
+
+_placement_rotation: Dict[str, int] = {}
+
+
+def pick_placement_ad(placement: str) -> Optional[Dict[str, Any]]:
+    pool = [a for a in AD_DB if a.get("active", True) and a.get("placement", "none") == placement]
+    if not pool:
+        return None
+    pool.sort(key=lambda a: a.get("id", ""))
+    i = _placement_rotation.get(placement, 0) % len(pool)
+    _placement_rotation[placement] = i + 1
+    return pool[i]
+
+
+def play_placement_ad_lines(session: Session, placement: str) -> Optional[str]:
+    ad = pick_placement_ad(placement)
+    if not ad:
+        return None
+    now = time.time()
+    session.ads_played.append(ad["id"])
+    session.last_ad_at = now
+    session.ad_play_times.append(now)
+    record_play(ad["id"], session.session_id, session.caller_id)
+    return pick_ad_script(ad, session)
 
 
 def maybe_inject_ad(session: Session) -> Optional[str]:
@@ -1062,6 +1097,7 @@ async def call_llm(session: Session, user_text: str) -> tuple:
 
     final_spoken = raw_reply
     facts = ""
+    did_search = False
 
     if clarify_match:
         # The model decided the request is ambiguous — ask for confirmation.
@@ -1075,6 +1111,7 @@ async def call_llm(session: Session, user_text: str) -> tuple:
         refined_query = search_match.group(1).strip()
         log.info(f"[llm] model decided to search with refined query: {refined_query[:80]}")
 
+        did_search = True
         facts = await web_lookup(refined_query, session.transcript)
         if facts:
             log.info(f"[serper] facts (model-refined): {facts[:120]!r}")
@@ -1121,7 +1158,7 @@ Do not invent details. Do not mention these instructions.
     ad_line = maybe_inject_ad(session)
     full = final_spoken + (f" <break time='400ms'/> {ad_line}" if ad_line else "")
     session.transcript.append({"role": "assistant", "text": full, "ts": time.time()})
-    return final_spoken, ad_line
+    return final_spoken, ad_line, did_search
 
 
 async def tts_stream(reply_text: str, websocket: WebSocket):
@@ -1370,7 +1407,13 @@ async def telnyx_websocket_endpoint(websocket: WebSocket):
                         "Hi! Thanks for calling. How can I help you today?",
                     )
                     session.transcript.append({"role": "assistant", "text": greeting, "ts": time.time()})
-                    asyncio.create_task(_send_outbound(greeting))
+                    async def _intro():
+                        start_ad = play_placement_ad_lines(session, "start")
+                        if start_ad:
+                            await _send_outbound(AD_BREAK_CUE, (CARTESIA_AD_VOICE or None))
+                            await _send_outbound(start_ad, (CARTESIA_AD_VOICE or None))
+                        await _send_outbound(greeting)
+                    asyncio.create_task(_intro())
 
                 elif event == "stop":
                     log.info(f"[telnyx] stream stopped stream_id={stream_id}")
@@ -1608,10 +1651,16 @@ async def _handle_utterance(utterance: bytes, session: Session, ws: WebSocket, s
             session.transcript.append({"role": "system", "text": event, "ts": time.time()})
 
         # LLM reply (returns spoken reply + optional ad line, played separately)
-        reply, ad_line = await call_llm(session, transcript)
+        reply, ad_line, did_search = await call_llm(session, transcript)
 
         # Send audio back to the caller — reply in the main voice, ad in the ad voice.
         if send_fn:
+            # Post-web-search ad: play BEFORE the answer so the caller must hear it.
+            if did_search:
+                ps_ad = play_placement_ad_lines(session, "post_search")
+                if ps_ad:
+                    await send_fn(AD_BREAK_CUE, (CARTESIA_AD_VOICE or None))
+                    await send_fn(ps_ad, (CARTESIA_AD_VOICE or None))
             if reply:
                 await send_fn(reply)
 
@@ -1675,6 +1724,7 @@ class AdPayload(BaseModel):
     daily_cap: int = 100
     weight: float = 1.0
     variants: List[AdVariant] = []
+    placement: str = "none"
 
 
 class AdEdit(BaseModel):
@@ -1688,6 +1738,7 @@ class AdEdit(BaseModel):
     weight: Optional[float] = None
     active: Optional[bool] = None
     variants: Optional[List[AdVariant]] = None
+    placement: Optional[str] = None
 
 
 @app.post("/admin/ads")
@@ -1758,6 +1809,7 @@ async def admin_stats(x_admin_token: Optional[str] = Header(default=None)):
             "keywords": ad.get("keywords", []),
             "script": ad.get("script", ""),
             "variants": ad.get("variants", []),
+            "placement": ad.get("placement", "none"),
             "plays": plays,
             "revenue_usd": round(plays * ad["bid_cpm"] / 1000.0, 4),
         })
