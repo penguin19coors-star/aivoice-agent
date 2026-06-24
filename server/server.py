@@ -27,7 +27,7 @@ from typing import Optional, List, Dict, Any
 from collections import defaultdict
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Header
-from fastapi.responses import PlainTextResponse, JSONResponse, HTMLResponse
+from fastapi.responses import PlainTextResponse, JSONResponse, HTMLResponse, Response
 from pydantic import BaseModel
 
 import httpx as _http
@@ -1948,6 +1948,26 @@ async def remove_ad_cue(x_admin_token: Optional[str] = Header(default=None)):
     return {"ok": True}
 
 
+@app.get("/icon-192.png")
+async def icon_192():
+    return Response(content=ICON_192, media_type="image/png", headers={"Cache-Control": "public, max-age=86400"})
+
+
+@app.get("/icon-512.png")
+async def icon_512():
+    return Response(content=ICON_512, media_type="image/png", headers={"Cache-Control": "public, max-age=86400"})
+
+
+@app.get("/icon.svg")
+async def icon_svg():
+    return Response(content=ICON_SVG, media_type="image/svg+xml", headers={"Cache-Control": "public, max-age=86400"})
+
+
+@app.get("/sw.js")
+async def service_worker():
+    return Response(content=SW_JS, media_type="application/javascript", headers={"Cache-Control": "no-cache"})
+
+
 @app.get("/admin", response_class=HTMLResponse)
 @app.get("/admin/", response_class=HTMLResponse)
 async def admin_dashboard():
@@ -1993,524 +2013,30 @@ async def pwa_manifest():
     }
 
 
-ADMIN_HTML = """<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>AI Voice Admin</title>
-  <meta name="theme-color" content="#0f172a">
-  <link rel="manifest" href="/manifest.json">
-  <script src="https://cdn.tailwindcss.com"></script>
-  <style>
-    :root { color-scheme: dark; }
-    body.light { background: #f8fafc; color: #0f172a; }
-    body.light .bg-slate-950 { background: #f8fafc !important; }
-    body.light .bg-slate-900 { background: #f1f5f9 !important; }
-    body.light .bg-slate-800 { background: #e2e8f0 !important; }
-    body.light .text-slate-200 { color: #0f172a !important; }
-    body.light .text-slate-400 { color: #64748b !important; }
-    body.light .border-slate-800 { border-color: #cbd5e1 !important; }
-    .nav-item { transition: all 0.1s; }
-    .nav-item.active { background-color: #1e2937; border-left: 3px solid #0ea5e9; }
-    body.light .nav-item.active { background-color: #e2e8f0; border-left-color: #0ea5e9; }
-    .section { display: none; }
-    .section.active { display: block; }
-    .modal { width: 80vw; height: 80vh; max-width: 80vw; max-height: 80vh; overflow: hidden; }
-    .modal-content { max-height: calc(80vh - 4rem); overflow-y: auto; }
-    @media (max-width: 768px) {
-      .modal { width: 92vw; height: 85vh; max-width: 92vw; max-height: 85vh; }
-      .modal-content { max-height: calc(85vh - 3.5rem); }
-      .sidebar { width: 100%; position: fixed; top: 0; left: 0; z-index: 50; transform: translateX(-100%); transition: transform 0.2s; }
-      .sidebar.open { transform: translateX(0); }
-      .main-content { margin-left: 0; }
-      .nav-item span:last-child { display: none; }
-    }
-    .small-btn { font-size: 10px; padding: 1px 6px; line-height: 1.2; }
-  </style>
-</head>
-<body class="bg-slate-950 text-slate-200">
-  <div class="flex h-screen overflow-hidden">
-    <div id="sidebar" class="sidebar w-64 bg-slate-900 border-r border-slate-800 flex flex-col">
-      <div class="p-4 border-b border-slate-800 flex items-center justify-between">
-        <div class="flex items-center gap-3">
-          <div class="w-9 h-9 bg-sky-500 rounded-xl flex items-center justify-center text-xl">📞</div>
-          <div>
-            <div class="font-semibold text-lg">Voice Agent</div>
-            <div class="text-xs text-slate-400">Admin</div>
-          </div>
-        </div>
-        <button onclick="toggleTheme()" class="text-xl" title="Toggle theme">🌓</button>
-      </div>
-      <div class="p-2 flex-1">
-        <div onclick="showSection('overview')" class="nav-item active flex items-center gap-3 px-3 py-2.5 rounded-xl cursor-pointer mb-1" data-nav="overview">
-          <span>📊</span> <span>Overview</span>
-        </div>
-        <div onclick="showSection('ads')" class="nav-item flex items-center gap-3 px-3 py-2.5 rounded-xl cursor-pointer mb-1" data-nav="ads">
-          <span>📢</span> <span>Manage Ads</span>
-        </div>
-        <div onclick="showSection('frequency')" class="nav-item flex items-center gap-3 px-3 py-2.5 rounded-xl cursor-pointer mb-1" data-nav="frequency">
-          <span>⏱️</span> <span>Frequency</span>
-        </div>
-        <div onclick="showSection('logs')" class="nav-item flex items-center gap-3 px-3 py-2.5 rounded-xl cursor-pointer" data-nav="logs">
-          <span>📋</span> <span>Recent Plays</span>
-        </div>
-      </div>
-      <div class="p-4 border-t border-slate-800 text-xs text-slate-400">
-        <div onclick="promptForToken()" class="cursor-pointer" title="Click to set/change admin token">Token: <span id="token-status" class="text-amber-400">not set</span></div>
-        <button onclick="installPWA()" class="mt-3 text-sky-400 hover:text-sky-300 text-xs">Install as App</button>
-      </div>
-    </div>
-
-    <div class="flex-1 flex flex-col main-content overflow-auto">
-      <div class="h-14 border-b border-slate-800 px-4 flex items-center justify-between bg-slate-900/70">
-        <div class="flex items-center gap-3">
-          <button onclick="toggleMobileSidebar()" class="md:hidden text-xl">☰</button>
-          <div id="section-title" class="font-semibold text-lg">Overview</div>
-        </div>
-        <div class="text-xs text-slate-400">Live • <span id="last-updated"></span></div>
-      </div>
-
-      <div id="overview" class="section active p-6">
-        <h1 class="text-2xl font-semibold mb-6">Call & Revenue Overview</h1>
-        <div class="grid grid-cols-2 md:grid-cols-5 gap-3">
-          <div class="bg-slate-900 rounded-2xl p-4">
-            <div class="text-slate-400 text-xs">Total Revenue</div>
-            <div id="total-revenue" class="text-2xl font-semibold mt-0.5 text-emerald-400">$0.00</div>
-          </div>
-          <div class="bg-slate-900 rounded-2xl p-4">
-            <div class="text-slate-400 text-xs">Ad Plays</div>
-            <div id="total-plays" class="text-2xl font-semibold mt-0.5">0</div>
-          </div>
-          <div class="bg-slate-900 rounded-2xl p-4">
-            <div class="text-slate-400 text-xs">Active Ads</div>
-            <div id="active-ads" class="text-2xl font-semibold mt-0.5">0</div>
-          </div>
-          <div class="bg-slate-900 rounded-2xl p-4">
-            <div class="text-slate-400 text-xs">Live Calls</div>
-            <div id="live-calls" class="text-2xl font-semibold mt-0.5">0</div>
-          </div>
-          <div class="bg-slate-900 rounded-2xl p-4">
-            <div class="text-slate-400 text-xs">Impressions</div>
-            <div id="impressions" class="text-2xl font-semibold mt-0.5">0</div>
-          </div>
-        </div>
-      </div>
-
-      <div id="ads" class="section p-6">
-        <div class="flex justify-between items-center mb-4">
-          <h2 class="text-xl font-semibold">Manage Paid Ads</h2>
-          <button onclick="showCreateAdModal()" class="px-4 py-2 bg-sky-600 hover:bg-sky-500 rounded-xl text-sm">+ New Ad</button>
-        </div>
-        <div id="ads-list" class="space-y-3"></div>
-      </div>
-
-      <div id="frequency" class="section p-6">
-        <h2 class="text-xl font-semibold mb-2">Ad Frequency & Minimums</h2>
-        <p class="text-slate-400 mb-6 text-sm">Control ad density and guarantee minimum plays after certain call lengths.</p>
-        <div class="max-w-xl bg-slate-900 rounded-2xl p-6 space-y-6">
-          <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <div>
-              <label class="block text-sm text-slate-400 mb-1">Min seconds between ads</label>
-              <input id="min-interval" type="number" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2 text-lg">
-            </div>
-            <div>
-              <label class="block text-sm text-slate-400 mb-1">Max ads in window</label>
-              <input id="max-ads" type="number" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2 text-lg">
-            </div>
-            <div>
-              <label class="block text-sm text-slate-400 mb-1">Window length (seconds)</label>
-              <input id="window-seconds" type="number" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2 text-lg">
-            </div>
-            <div>
-              <label class="block text-sm text-slate-400 mb-1">Force min ads after (seconds)</label>
-              <input id="force-after" type="number" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2 text-lg">
-            </div>
-            <div>
-              <label class="block text-sm text-slate-400 mb-1">Minimum ads target</label>
-              <input id="min-target" type="number" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2 text-lg">
-            </div>
-          </div>
-          <button onclick="saveFrequency()" class="w-full py-3 bg-emerald-600 hover:bg-emerald-500 rounded-2xl font-medium">Save Frequency Settings</button>
-          <div id="freq-status" class="text-center text-sm text-emerald-400 h-5"></div>
-<div style="margin-top:16px;border-top:1px solid #444;padding-top:12px"><label style="display:block;font-size:13px;margin-bottom:6px">Ad intro sound &mdash; an MP3 that plays before every ad</label><input type="file" id="cue-file" accept="audio/*" style="font-size:12px"><button onclick="uploadAdCue()" style="padding:6px 12px;margin-left:6px">Upload</button><button onclick="removeAdCue()" style="padding:6px 12px;margin-left:6px">Remove</button></div>
-        </div>
-      </div>
-
-      <div id="logs" class="section p-6">
-        <h2 class="text-xl font-semibold mb-4">Recent Ad Plays</h2>
-        <div id="logs-list" class="space-y-2 text-sm font-mono"></div>
-      </div>
-    </div>
-  </div>
-
-  <div id="modal" onclick="if (event.target.id === 'modal') hideModal()" class="hidden fixed inset-0 bg-black/70 flex items-center justify-center z-[100]">
-    <div onclick="event.stopImmediatePropagation()" class="modal bg-slate-900 rounded-3xl p-6 flex flex-col">
-      <div id="modal-content" class="modal-content flex-1 overflow-y-auto"></div>
-    </div>
-  </div>
-
-<script>
-try {
-  let ADMIN_TOKEN = localStorage.getItem('admin_token') || '';
-  let currentSection = 'overview';
-  let currentVariants = [];
-
-  function setToken(t) {
-    ADMIN_TOKEN = (t || '').trim();
-    localStorage.setItem('admin_token', ADMIN_TOKEN);
-    updateTokenStatus(ADMIN_TOKEN ? 'checking…' : 'not set', ADMIN_TOKEN ? '#fbbf24' : '#f87171');
-  }
-
-  function updateTokenStatus(text, color) {
-    const el = document.getElementById('token-status');
-    if (el) { el.textContent = text; el.style.color = color || ''; }
-  }
-
-  function promptForToken() {
-    const tok = prompt('Enter Admin Token (set as ADMIN_TOKEN in Render):');
-    if (tok) { setToken(tok); refreshCurrent(); }
-  }
-
-  function refreshCurrent() {
-    if (currentSection === 'ads') loadAds();
-    else if (currentSection === 'frequency') loadFrequency();
-    else if (currentSection === 'logs') loadLogs();
-    else loadOverview();
-  }
-
-  function toggleTheme() {
-    const body = document.body;
-    if (body.classList.contains('light')) {
-      body.classList.remove('light');
-      localStorage.setItem('theme', 'dark');
-    } else {
-      body.classList.add('light');
-      localStorage.setItem('theme', 'light');
-    }
-  }
-
-  function applySavedTheme() {
-    const saved = localStorage.getItem('theme');
-    if (saved === 'light') document.body.classList.add('light');
-  }
-
-  async function api(path, method = 'GET', body = null) {
-    const headers = { 'X-Admin-Token': ADMIN_TOKEN };
-    if (body) headers['Content-Type'] = 'application/json';
-    const res = await fetch(path, { method, headers, body: body ? JSON.stringify(body) : undefined });
-    if (!res.ok) {
-      if (res.status === 401) {
-        updateTokenStatus('invalid — click to fix', '#f87171');
-        const tok = prompt('Admin token is missing or wrong. Enter your ADMIN_TOKEN (from Render):');
-        if (tok) { setToken(tok); return api(path, method, body); }
-      }
-      throw new Error(await res.text());
-    }
-    updateTokenStatus('connected', '#34d399');
-    return res.json();
-  }
-
-  function showSection(name) {
-    currentSection = name;
-    document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
-    const sec = document.getElementById(name);
-    if (sec) sec.classList.add('active');
-
-    document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
-    const nav = document.querySelector(`[data-nav="${name}"]`);
-    if (nav) nav.classList.add('active');
-
-    const title = document.getElementById('section-title');
-    if (title) title.textContent = name.charAt(0).toUpperCase() + name.slice(1);
-
-    const sb = document.getElementById('sidebar');
-    if (window.innerWidth < 768 && sb) sb.classList.remove('open');
-
-    if (name === 'ads') loadAds();
-    if (name === 'overview') loadOverview();
-    if (name === 'frequency') loadFrequency();
-    if (name === 'logs') loadLogs();
-  }
-
-  async function loadOverview() {
-    try {
-      const stats = await api('/admin/stats');
-      const t = stats.totals || {};
-      const rev = document.getElementById('total-revenue');
-      const plays = document.getElementById('total-plays');
-      const active = document.getElementById('active-ads');
-      const live = document.getElementById('live-calls');
-      const imps = document.getElementById('impressions');
-      if (rev) rev.textContent = '$' + (t.total_revenue_usd || 0).toFixed(2);
-      if (plays) plays.textContent = t.total_plays || 0;
-      if (active) active.textContent = t.active_ads || 0;
-      if (live) live.textContent = t.sessions_active || 0;
-      if (imps) imps.textContent = t.impressions_logged || 0;
-    } catch(e) { console.error(e); }
-  }
-
-  async function loadAds() {
-    try {
-      const stats = await api('/admin/stats');
-      const container = document.getElementById('ads-list');
-      if (!container) return;
-      container.innerHTML = '';
-      (stats.ads || []).forEach(ad => {
-        const div = document.createElement('div');
-        div.className = `bg-slate-900 rounded-2xl p-4 flex justify-between items-start ${ad.active ? '' : 'opacity-60'}`;
-        const plays = ad.plays || 0;
-        const rev = (ad.revenue_usd || 0).toFixed(2);
-        div.innerHTML = `
-          <div class="flex-1 min-w-0">
-            <div class="font-medium truncate">${ad.sponsor} <span class="text-xs px-2 py-0.5 rounded bg-slate-800">${ad.id}</span></div>
-            <div class="text-xs text-slate-400 mt-0.5 truncate">${(ad.keywords || []).join(', ')}</div>
-            <div class="text-xs mt-1 text-slate-500">Plays: ${plays} • Rev: $${rev} • Variants: ${(ad.variants || []).length}</div>
-          </div>
-          <div class="flex flex-col gap-1 text-right ml-2">
-            <button onclick="editAd('${ad.id}')" class="small-btn text-sky-400 hover:text-sky-300">Edit</button>
-            <button onclick="toggleAd('${ad.id}')" class="small-btn text-amber-400 hover:text-amber-300">${ad.active ? 'Pause' : 'Activate'}</button>
-            <button onclick="deleteAd('${ad.id}')" class="small-btn text-red-400 hover:text-red-300">Delete</button>
-          </div>
-        `;
-        container.appendChild(div);
-      });
-    } catch(e) { console.error(e); }
-  }
-
-  async function loadFrequency() {
-    try {
-      const s = await api('/admin/settings');
-      const f = s.frequency || {};
-      const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v ?? ''; };
-      set('min-interval', f.min_interval_seconds);
-      set('max-ads', f.max_ads);
-      set('window-seconds', f.window_seconds);
-      set('force-after', f.force_min_ads_after_seconds);
-      set('min-target', f.min_ads_target);
-    } catch(e) { console.error(e); }
-  }
-
-  async function saveFrequency() {
-    const get = id => parseInt(document.getElementById(id).value || '0');
-    const payload = {
-      min_interval_seconds: get('min-interval'),
-      max_ads: get('max-ads'),
-      window_seconds: get('window-seconds'),
-      force_min_ads_after_seconds: get('force-after'),
-      min_ads_target: get('min-target'),
-    };
-    try {
-      await api('/admin/settings', 'PUT', payload);
-      const st = document.getElementById('freq-status');
-      if (st) { st.textContent = 'Saved ✓'; setTimeout(() => { if (st) st.textContent = ''; }, 2000); }
-    } catch(e) { alert('Failed: ' + e.message); }
-  }
-
-  async function loadLogs() {
-    try {
-      const stats = await api('/admin/stats');
-      const container = document.getElementById('logs-list');
-      if (!container) return;
-      container.innerHTML = '';
-      (stats.recent_impressions || []).slice(0, 30).forEach(imp => {
-        const div = document.createElement('div');
-        div.className = 'bg-slate-900 px-3 py-1.5 rounded-xl flex justify-between text-xs';
-        div.innerHTML = `<span>${new Date(imp.ts * 1000).toLocaleString()}</span> <span>${imp.sponsor} • $${imp.revenue_usd.toFixed(4)}</span>`;
-        container.appendChild(div);
-      });
-    } catch(e) { console.error(e); }
-  }
-
-  function renderVariants() {
-    const container = document.getElementById('variants-list');
-    if (!container) return;
-    container.innerHTML = '';
-    currentVariants.forEach((v, idx) => {
-      const div = document.createElement('div');
-      div.className = 'bg-slate-800 rounded-xl p-3 mb-2';
-      div.innerHTML = `
-        <div class="flex justify-between mb-1">
-          <div class="text-xs text-slate-400">Variant ${idx+1}</div>
-          <button onclick="removeVariant(${idx})" class="text-red-400 text-xs">Remove</button>
-        </div>
-        <input placeholder="Keywords (comma sep)" value="${(v.keywords || []).join(', ')}" 
-               onchange="updateVariant(${idx}, 'keywords', this.value)" class="w-full bg-slate-700 rounded px-2 py-1 text-sm mb-1">
-        <textarea placeholder="Script for this variant" onchange="updateVariant(${idx}, 'script', this.value)" 
-                  class="w-full bg-slate-700 rounded px-2 py-1 text-sm h-16">${v.script || ''}</textarea>
-      `;
-      container.appendChild(div);
-    });
-  }
-  function addVariant() { currentVariants.push({ keywords: [], script: '' }); renderVariants(); }
-  function removeVariant(idx) { currentVariants.splice(idx, 1); renderVariants(); }
-  function updateVariant(idx, field, value) {
-    if (field === 'keywords') currentVariants[idx].keywords = value.split(',').map(s => s.trim()).filter(Boolean);
-    else currentVariants[idx].script = value;
-  }
-
-  async function editAd(id) {
-    try {
-      const stats = await api('/admin/stats');
-      const ad = (stats.ads || []).find(a => a.id === id);
-      if (!ad) return;
-      currentVariants = (ad.variants || []).map(v => ({...v}));
-      const html = `
-        <h3 class="font-semibold text-xl mb-4">Edit Sponsor Ad</h3>
-        <div class="space-y-4 text-sm">
-          <div><label class="text-xs text-slate-400">Sponsor</label><input id="m-sponsor" value="${ad.sponsor || ''}" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2.5"></div>
-          <div><label class="text-xs text-slate-400">Main Script</label><textarea id="m-script" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2.5 h-20">${ad.script || ''}</textarea></div>
-<div style="margin:8px 0"><label style="display:block;font-size:12px;opacity:.8;margin-bottom:4px">Ad placement</label><select id="m-placement" onchange="setAdPlacement('${ad.id}', this.value, this)" style="width:100%;padding:6px;border-radius:6px"><option value="none"${(ad.placement||'none')==='none'?' selected':''}>None (keyword-matched)</option><option value="start"${ad.placement==='start'?' selected':''}>Start of call</option><option value="post_search"${ad.placement==='post_search'?' selected':''}>After web search</option></select></div>
-          <div class="grid grid-cols-2 gap-3">
-            <div><label class="text-xs text-slate-400">Bid CPM</label><input id="m-bid" type="number" step="0.5" value="${ad.bid_cpm || 0}" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2.5"></div>
-            <div><label class="text-xs text-slate-400">Daily Cap</label><input id="m-cap" type="number" value="${ad.daily_cap || 100}" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2.5"></div>
-          </div>
-          <div>
-            <div class="flex justify-between items-center mb-2">
-              <label class="text-xs text-slate-400">Keyword Variants (optional)</label>
-              <button onclick="addVariant()" class="text-xs px-3 py-1 bg-slate-700 rounded">+ Add Variant</button>
-            </div>
-            <div id="variants-list" class="max-h-48 overflow-auto"></div>
-          </div>
-          <div class="flex items-center gap-4 pt-2">
-            <label class="flex items-center gap-2 text-xs"><input type="checkbox" id="m-active" ${ad.active ? 'checked' : ''} class="w-4 h-4"> Active</label>
-          </div>
-        </div>
-        <div class="flex gap-3 mt-6">
-          <button onclick="saveAdEdit('${id}')" class="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-500 rounded-2xl">Save</button>
-          <button onclick="hideModal()" class="px-6 py-2.5 bg-slate-700 rounded-2xl">Cancel</button>
-        </div>
-      `;
-      const mc = document.getElementById('modal-content');
-      const md = document.getElementById('modal');
-      if (mc) mc.innerHTML = html;
-      if (md) { md.classList.remove('hidden'); md.classList.add('flex'); }
-      setTimeout(renderVariants, 50);
-    } catch(e) { console.error(e); }
-  }
-
-  async function saveAdEdit(id) {
-    const payload = {
-      sponsor: document.getElementById('m-sponsor').value,
-      script: document.getElementById('m-script').value,
-      bid_cpm: parseFloat(document.getElementById('m-bid').value),
-      daily_cap: parseInt(document.getElementById('m-cap').value),
-      active: document.getElementById('m-active').checked,
-      variants: currentVariants
-    };
-    try {
-      await api(`/admin/ads/${id}`, 'PUT', payload);
-      hideModal();
-      loadAds();
-    } catch(e) { alert('Save failed'); }
-  }
-
-  async function toggleAd(id) {
-    if (!confirm("Toggle this ad's active state?")) return;
-    try { await api(`/admin/ads/${id}/toggle`, 'POST'); loadAds(); } catch(e){alert(e.message);}
-  }
-
-  async function deleteAd(id) {
-    if (!confirm("Permanently delete this ad?")) return;
-    try { await api(`/admin/ads/${id}`, 'DELETE'); loadAds(); } catch(e){alert(e.message);}
-  }
-
-  function showCreateAdModal() {
-    const html = `
-      <h3 class="font-semibold text-xl mb-4">Create New Ad</h3>
-      <div class="space-y-3 text-sm">
-        <input id="c-sponsor" placeholder="Sponsor Name" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2.5">
-        <input id="c-keywords" placeholder="Keywords (comma separated)" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2.5">
-        <textarea id="c-script" placeholder="Main ad script" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2.5 h-20"></textarea>
-        <div class="grid grid-cols-2 gap-3">
-          <input id="c-bid" type="number" step="0.5" value="10" class="bg-slate-800 border border-slate-700 rounded-xl px-4 py-2.5" placeholder="Bid CPM">
-          <input id="c-cap" type="number" value="100" class="bg-slate-800 border border-slate-700 rounded-xl px-4 py-2.5" placeholder="Daily Cap">
-        </div>
-        <button onclick="createAd()" class="w-full py-2.5 bg-sky-600 hover:bg-sky-500 rounded-2xl">Create</button>
-      </div>
-    `;
-    const mc = document.getElementById('modal-content');
-    const md = document.getElementById('modal');
-    if (mc) mc.innerHTML = html;
-    if (md) { md.classList.remove('hidden'); md.classList.add('flex'); }
-  }
-
-  async function createAd() {
-    const payload = {
-      sponsor: document.getElementById('c-sponsor').value,
-      industry: 'general',
-      keywords: document.getElementById('c-keywords').value.split(',').map(s => s.trim()).filter(Boolean),
-      script: document.getElementById('c-script').value,
-      bid_cpm: parseFloat(document.getElementById('c-bid').value) || 8,
-      daily_cap: parseInt(document.getElementById('c-cap').value) || 100,
-      weight: 1.0,
-      variants: []
-    };
-    try {
-      await api('/admin/ads', 'POST', payload);
-      hideModal();
-      loadAds();
-    } catch(e) { alert('Create failed'); }
-  }
-
-  function hideModal() {
-    const md = document.getElementById('modal');
-    if (md) { md.classList.add('hidden'); md.classList.remove('flex'); }
-  }
-
-  function toggleMobileSidebar() {
-    const sb = document.getElementById('sidebar');
-    if (sb) sb.classList.toggle('open');
-  }
-
-  async function installPWA() {
-    if (window.deferredPrompt) window.deferredPrompt.prompt();
-    else alert('Use browser menu → Add to Home Screen');
-  }
-
-  async function init() {
-    applySavedTheme();
-    window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); window.deferredPrompt = e; });
-    if ('serviceWorker' in navigator) { navigator.serviceWorker.register('/sw.js').catch(()=>{}); }
-    updateTokenStatus(ADMIN_TOKEN ? 'checking…' : 'not set', ADMIN_TOKEN ? '#fbbf24' : '#f87171');
-    if (!ADMIN_TOKEN) {
-      const tok = prompt('Enter Admin Token (set as ADMIN_TOKEN in Render):');
-      if (tok) setToken(tok);
-    }
-    await loadOverview();
-    const lu = document.getElementById('last-updated');
-    if (lu) lu.textContent = new Date().toLocaleTimeString();
-    setInterval(() => {
-      const ov = document.getElementById('overview');
-      if (ov && ov.classList.contains('active')) loadOverview();
-    }, 15000);
-  }
-
-  // Expose all handler functions to the global scope so inline onclick=""
-  // attributes can find them. Because this whole script runs inside a try{}
-  // block, function declarations are block-scoped and would otherwise be
-  // invisible to inline handlers (making the whole UI non-clickable).
-  Object.assign(window, {
-  uploadAdCue: function(){ var el=document.getElementById('cue-file'); var f=el&&el.files&&el.files[0]; if(!f){ alert('Choose an MP3 file first.'); return; } var rd=new FileReader(); rd.onload=function(){ var b64=String(rd.result).split(',')[1]; api('/admin/ad-cue','POST',{mp3_b64:b64}).then(function(){ alert('Cue uploaded. It will play before every ad.'); }).catch(function(e){ alert('Upload failed: '+e); }); }; rd.readAsDataURL(f); },
-  removeAdCue: function(){ if(!confirm('Remove the ad intro sound?')) return; api('/admin/ad-cue','DELETE').then(function(){ alert('Removed.'); }).catch(function(e){ alert('Remove failed: '+e); }); },
-  setAdPlacement: async function(id, val, sel){ try { if (sel) sel.disabled = true; await api('/admin/ads/' + id, 'PUT', { placement: val }); if (sel) { sel.disabled = false; sel.style.borderColor = '#4caf50'; } } catch (e) { if (sel) sel.disabled = false; alert('Could not save placement: ' + e); } },
-    showSection, toggleTheme, toggleMobileSidebar, installPWA,
-    showCreateAdModal, createAd, editAd, saveAdEdit, toggleAd, deleteAd,
-    hideModal, addVariant, removeVariant, updateVariant, saveFrequency,
-    setToken, promptForToken, updateTokenStatus, refreshCurrent
-  });
-
-  init();
-} catch(e) {
-  console.error('Dashboard failed:', e);
-  alert('Dashboard error. Hard refresh and redeploy. ' + e.message);
-}
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
-</script>
-</body>
-</html>
-"""
+def _read_text(name, fallback=""):
+    try:
+        with open(os.path.join(_BASE_DIR, name), "r", encoding="utf-8") as f:
+            return f.read()
+    except Exception:
+        return fallback
+
+
+def _read_bytes(name):
+    try:
+        with open(os.path.join(_BASE_DIR, name), "rb") as f:
+            return f.read()
+    except Exception:
+        return b""
+
+
+ADMIN_HTML = _read_text("admin_dashboard.html", "<!doctype html><meta charset=utf-8><body style='font-family:sans-serif;padding:40px;background:#10141a;color:#fff'><h2>Ad Console</h2><p>Dashboard file missing.</p></body>")
+ICON_192 = _read_bytes("icon-192.png")
+ICON_512 = _read_bytes("icon-512.png")
+ICON_SVG = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='14' fill='#10141a'/><rect x='8' y='27' width='5' height='10' rx='2.5' fill='#34d7f0'/><rect x='18' y='20' width='5' height='24' rx='2.5' fill='#34d7f0'/><rect x='28' y='12' width='5' height='40' rx='2.5' fill='#2dd4bf'/><rect x='38' y='20' width='5' height='24' rx='2.5' fill='#2dd4bf'/><rect x='48' y='27' width='5' height='10' rx='2.5' fill='#2dd4bf'/></svg>"
+SW_JS = "self.addEventListener('install', function(e){ self.skipWaiting(); }); self.addEventListener('activate', function(e){ self.clients.claim(); }); self.addEventListener('fetch', function(e){});"
 
 @app.on_event("startup")
 async def _on_startup():
