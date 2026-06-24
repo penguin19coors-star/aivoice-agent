@@ -779,6 +779,7 @@ LOOKUP & CLARIFICATION BEHAVIOR (key to good user experience and accuracy):
     Example: [CLARIFY: Is that the Joe's Pizza downtown or the one on Main Street?]
 - This lets you "search your knowledge base" first to interpret the request properly and either get better search results or ask the user to confirm so we don't waste a search or give wrong info.
 - Only after the system runs the search (or the user clarifies) will you receive the live facts and produce the final spoken answer.
+- STRONGLY PREFER [NEED_SEARCH]. Use [CLARIFY] only as a true last resort when you cannot form ANY reasonable search query. Make your best assumption and search rather than asking. Never ask more than one clarifying question in a call — after one, pick the most likely interpretation and search immediately.
 - For normal conversational questions or stable knowledge (history, definitions, "how are you", general how-to), just answer naturally and directly. Never use the special tags for those.
 """
 
@@ -1181,20 +1182,22 @@ async def call_llm(session: Session, user_text: str) -> tuple:
     facts = ""
     did_search = False
 
-    if clarify_match:
-        # The model decided the request is ambiguous — ask for confirmation.
-        # This is great UX and prevents bad/wasted searches.
+    if clarify_match and session.metadata.get("clarify_count", 0) < 1:
+        # Clarify at most once per call, then just look it up.
+        session.metadata["clarify_count"] = 1
         final_spoken = clarify_match.group(1).strip()
         log.info(f"[llm] model requested clarification: {final_spoken[:80]}")
 
-    elif search_match:
+    elif search_match or clarify_match:
         # The model used its knowledge to interpret the request and produced
         # a better search query. Now we do the (cheaper targeted) Serper call.
-        refined_query = search_match.group(1).strip()
+        refined_query = search_match.group(1).strip() if search_match else user_text
         log.info(f"[llm] model decided to search with refined query: {refined_query[:80]}")
 
         did_search = True
+        _t0 = time.time()
         facts = await web_lookup(refined_query, session.transcript)
+        log.info(f"[timing] web lookup took {time.time() - _t0:.2f}s for: {refined_query[:60]}")
         if facts:
             log.info(f"[serper] facts (model-refined): {facts[:120]!r}")
             # Second pass: give the model the verified facts so it can speak a good final answer.
