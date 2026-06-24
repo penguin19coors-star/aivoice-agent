@@ -16,6 +16,10 @@ import html
 import asyncio
 import threading
 import audioop
+try:
+    import miniaudio
+except Exception:
+    miniaudio = None
 from datetime import datetime, timezone
 from dataclasses import dataclass, field, asdict
 from typing import Optional, List, Dict, Any
@@ -789,6 +793,47 @@ CARTESIA_VOICE = os.environ.get("CARTESIA_VOICE", "")  # main assistant voice; e
 CARTESIA_AD_VOICE = os.environ.get("CARTESIA_AD_VOICE", "")  # voice for ad reads; empty => falls back to main voice
 AD_BREAK_CUE = os.environ.get("AD_BREAK_CUE", "And now, a quick word from our sponsor.")
 
+AD_CUE_PATH = os.path.join(os.environ.get("DATA_DIR", "/var/data"), "ad_cue.ulaw")
+AD_CUE_ULAW: Optional[bytes] = None
+
+
+def _decode_audio_to_ulaw(data: bytes) -> bytes:
+    """Decode MP3/WAV/etc bytes to 8kHz mono mu-law (telephone format)."""
+    if miniaudio is None:
+        raise RuntimeError("audio decoder (miniaudio) not available")
+    dec = miniaudio.decode(data, output_format=miniaudio.SampleFormat.SIGNED16, nchannels=1, sample_rate=8000)
+    return audioop.lin2ulaw(dec.samples.tobytes(), 2)
+
+
+def load_ad_cue() -> None:
+    global AD_CUE_ULAW
+    try:
+        with open(AD_CUE_PATH, "rb") as f:
+            AD_CUE_ULAW = f.read()
+        log.info(f"[cue] loaded ad cue ({len(AD_CUE_ULAW)} bytes mu-law)")
+    except FileNotFoundError:
+        AD_CUE_ULAW = None
+    except Exception as e:
+        AD_CUE_ULAW = None
+        log.warning(f"[cue] load failed: {e}")
+
+
+def save_ad_cue(ulaw: bytes) -> None:
+    global AD_CUE_ULAW
+    os.makedirs(os.path.dirname(AD_CUE_PATH), exist_ok=True)
+    with open(AD_CUE_PATH, "wb") as f:
+        f.write(ulaw)
+    AD_CUE_ULAW = ulaw
+
+
+def clear_ad_cue() -> None:
+    global AD_CUE_ULAW
+    AD_CUE_ULAW = None
+    try:
+        os.remove(AD_CUE_PATH)
+    except FileNotFoundError:
+        pass
+
 # Ad frequency controls (per call / phone time)
 # These let you control how many ads are played relative to call duration.
 # Runtime frequency settings (can be overridden from /admin dashboard)
@@ -1311,7 +1356,7 @@ async def telnyx_websocket_endpoint(websocket: WebSocket):
     awaiting_start = True
     _b64 = __import__("base64")
 
-    async def _send_outbound(text: str, voice_id: Optional[str] = None):
+    async def _send_outbound(text: str, voice_id: Optional[str] = None, raw_ulaw: Optional[bytes] = None):
         nonlocal stream_id
         if not stream_id:
             return
@@ -1320,8 +1365,11 @@ async def telnyx_websocket_endpoint(websocket: WebSocket):
         # (~20ms @ 8kHz PCMU) frames. Telnyx expects this JSON format even in
         # bidirectional mode — raw WebSocket bytes are NOT played.
         outbound_buffer = bytearray()
-        async for chunk in _cartesia_ulaw_stream(text, voice_id=voice_id):
-            outbound_buffer.extend(chunk)
+        if raw_ulaw is not None:
+            outbound_buffer.extend(raw_ulaw)
+        else:
+            async for chunk in _cartesia_ulaw_stream(text, voice_id=voice_id):
+                outbound_buffer.extend(chunk)
         if not outbound_buffer:
             return
         session.is_speaking = True
@@ -1410,6 +1458,8 @@ async def telnyx_websocket_endpoint(websocket: WebSocket):
                     async def _intro():
                         start_ad = play_placement_ad_lines(session, "start")
                         if start_ad:
+                            if AD_CUE_ULAW:
+                                await _send_outbound("", raw_ulaw=AD_CUE_ULAW)
                             await _send_outbound(start_ad, (CARTESIA_AD_VOICE or None))
                         await _send_outbound(greeting)
                     asyncio.create_task(_intro())
@@ -1658,6 +1708,8 @@ async def _handle_utterance(utterance: bytes, session: Session, ws: WebSocket, s
             if did_search:
                 ps_ad = play_placement_ad_lines(session, "post_search")
                 if ps_ad:
+                    if AD_CUE_ULAW:
+                        await send_fn("", raw_ulaw=AD_CUE_ULAW)
                     await send_fn(ps_ad, (CARTESIA_AD_VOICE or None))
             if reply:
                 await send_fn(reply)
@@ -1666,6 +1718,8 @@ async def _handle_utterance(utterance: bytes, session: Session, ws: WebSocket, s
                 # Pre-ad cue so the caller knows a sponsor message is coming
 
                 # The actual ad script (separate voice)
+                if AD_CUE_ULAW:
+                    await send_fn("", raw_ulaw=AD_CUE_ULAW)
                 await send_fn(ad_line, (CARTESIA_AD_VOICE or None))
 
                 # Post-ad bridge: re-engage with the original question to keep
@@ -1853,6 +1907,41 @@ async def update_settings(payload: dict, x_admin_token: Optional[str] = Header(d
     log.info(f"[settings] updated: {updated}  current FREQUENCY={FREQUENCY}")
     return {"updated": updated, "current": dict(FREQUENCY)}
 
+
+
+@app.post("/admin/ad-cue")
+async def upload_ad_cue(payload: dict, x_admin_token: Optional[str] = Header(default=None)):
+    check_admin(x_admin_token)
+    b64 = (payload.get("mp3_b64") or payload.get("b64") or "").strip()
+    if b64.startswith("data:") and "," in b64:
+        b64 = b64.split(",", 1)[1]
+    try:
+        raw = _b64.b64decode(b64)
+    except Exception:
+        raise HTTPException(400, "invalid base64 audio")
+    if not raw:
+        raise HTTPException(400, "empty audio")
+    try:
+        ulaw = _decode_audio_to_ulaw(raw)
+    except Exception as e:
+        raise HTTPException(400, f"could not decode audio: {e}")
+    save_ad_cue(ulaw)
+    log.info(f"[cue] uploaded ad cue ({len(ulaw)} bytes)")
+    return {"ok": True, "bytes": len(ulaw), "seconds": round(len(ulaw) / 8000.0, 2)}
+
+
+@app.get("/admin/ad-cue")
+async def get_ad_cue(x_admin_token: Optional[str] = Header(default=None)):
+    check_admin(x_admin_token)
+    n = len(AD_CUE_ULAW) if AD_CUE_ULAW else 0
+    return {"set": n > 0, "bytes": n, "seconds": round(n / 8000.0, 2)}
+
+
+@app.delete("/admin/ad-cue")
+async def remove_ad_cue(x_admin_token: Optional[str] = Header(default=None)):
+    check_admin(x_admin_token)
+    clear_ad_cue()
+    return {"ok": True}
 
 
 @app.get("/admin", response_class=HTMLResponse)
@@ -2420,6 +2509,7 @@ try {
 async def _on_startup():
     try:
         db_init()
+        load_ad_cue()
     except Exception as exc:
         log.error(f"[db] init failed: {exc} — running with in-memory state only")
 
