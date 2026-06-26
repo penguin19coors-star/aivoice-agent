@@ -182,6 +182,8 @@
       <div class="nav" data-sec="ads"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l18-5v12L3 14v-3z"/><path d="M11.6 16.8a3 3 0 1 1-5.8-1.6"/></svg><span class="nname">Ads</span></div>
       <div class="nav" data-sec="frequency"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg><span class="nname">Frequency</span></div>
       <div class="nav" data-sec="cue"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg><span class="nname">Ad Intro Sound</span></div>
+      <div class="nav-section">Revenue</div>
+      <div class="nav" data-sec="billing"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg><span class="nname">Billing</span></div>
     </div>
     <div class="sidebar-foot"><span id="connState">connecting…</span> &middot; <a href="#" id="signout">sign out</a></div>
   </aside>
@@ -264,7 +266,7 @@ function unlock(){
 function openNav(){ $("sidebar").classList.add("open"); $("overlay").classList.add("show"); }
 function closeNav(){ $("sidebar").classList.remove("open"); $("overlay").classList.remove("show"); }
 
-var TITLES={ overview:"Overview", ads:"Ads", frequency:"Ad Frequency", cue:"Ad Intro Sound" };
+var TITLES={ overview:"Overview", ads:"Ads", frequency:"Ad Frequency", cue:"Ad Intro Sound", billing:"Billing" };
 function show(sec){
   SECTION=sec; closeNav();
   $("pageTitle").textContent=TITLES[sec]||sec;
@@ -273,6 +275,7 @@ function show(sec){
   else if(sec==="ads") renderAds();
   else if(sec==="frequency") renderFrequency();
   else if(sec==="cue") renderCue();
+  else if(sec==="billing") renderBilling();
 }
 
 function refresh(){
@@ -484,6 +487,84 @@ function uploadCue(){
       .catch(function(e){ b.disabled=false; b.textContent="Upload"; toast("Failed: "+e.message); });
   };
   rd.readAsDataURL(f);
+}
+
+/* ---- billing ---- */
+var MONTH_NAMES=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+function monthLabel(ym){
+  if(!ym || ym==="unknown" || String(ym).indexOf("-")<0) return ym||"Unknown";
+  var parts=String(ym).split("-"); var mi=parseInt(parts[1],10)-1;
+  return (MONTH_NAMES[mi]||parts[1])+" "+parts[0];
+}
+function billAmount(plays, cpm){ return (Number(plays)||0)*(Number(cpm)||0)/1000; }
+function recalcCard(card){
+  var cpm=parseFloat(card.querySelector(".co-cpm").value)||0;
+  var tot=0;
+  card.querySelectorAll("[data-plays]").forEach(function(row){
+    var plays=parseInt(row.getAttribute("data-plays"))||0;
+    var amt=billAmount(plays,cpm); tot+=amt;
+    var ae=row.querySelector(".amt"); if(ae) ae.textContent=money(amt);
+  });
+  card.querySelector(".co-total").textContent=money(tot);
+  recalcGrand();
+}
+function recalcGrand(){
+  var g=0;
+  document.querySelectorAll(".co-total").forEach(function(el){ g+=parseFloat(el.textContent.replace(/[^0-9.\-]/g,""))||0; });
+  var ge=$("grandTotal"); if(ge) ge.textContent=money(g);
+}
+function renderBilling(){
+  var v=$("view"); v.innerHTML='<div class="loading">loading…</div>';
+  api("/admin/billing","GET").then(function(d){
+    var cos=(d&&d.companies)||[];
+    if(!cos.length){ v.innerHTML='<div class="section-card"><div class="muted">No companies yet. Add an ad with a sponsor name to start tracking plays and billing.</div></div>'; return; }
+    var html='<div class="grid stats" style="margin-bottom:18px;">'
+      +statCard("Companies", String(cos.length))
+      +'<div class="stat"><div class="label">Billable across all months</div><div class="value" id="grandTotal">$0.00</div></div>'
+      +'</div>';
+    html+='<div class="muted" style="margin-bottom:16px;">Each month shows that company&rsquo;s plays &times; its CPM (price per 1,000 plays). Edit a rate to update the totals instantly; <b>Save rate</b> stores it on that company&rsquo;s ads for future plays.</div>';
+    html+=cos.map(function(co){
+      var months=co.months||{};
+      var keys=Object.keys(months).sort().reverse();
+      var rows=keys.map(function(ym){
+        return '<div class="between" data-plays="'+(months[ym]||0)+'" style="padding:8px 0;border-top:1px solid var(--border);font-family:var(--mono);font-size:13px;">'
+          +'<span style="flex:1;">'+esc(monthLabel(ym))+'</span>'
+          +'<span class="dim" style="margin:0 14px;">'+(months[ym]||0)+' plays</span>'
+          +'<span class="amt" style="color:var(--text);font-weight:700;min-width:78px;text-align:right;">$0.00</span>'
+          +'</div>';
+      }).join("");
+      if(!keys.length){ rows='<div class="muted" style="padding:8px 0;border-top:1px solid var(--border);">No plays recorded yet.</div>'; }
+      return '<div class="section-card" data-co="'+esc(co.sponsor)+'">'
+        +'<div class="between" style="margin-bottom:14px;">'
+        +'<div><div style="font-size:16px;font-weight:700;">'+esc(co.sponsor)+'</div><div class="dim" style="margin-top:2px;">'+(co.total_plays||0)+' total plays</div></div>'
+        +'<div style="text-align:right;"><div class="dim">company total</div><div class="co-total" style="font-size:22px;font-weight:700;font-family:var(--mono);">$0.00</div></div></div>'
+        +'<div class="row" style="gap:10px;align-items:flex-end;margin-bottom:4px;">'
+        +'<div class="field" style="margin:0;flex:1;max-width:210px;"><label>CPM (per 1,000 plays)</label><input type="number" step="0.01" min="0" class="co-cpm" value="'+(co.cpm!=null?co.cpm:0)+'"></div>'
+        +'<button class="btn cyan sm co-save" type="button">Save rate</button></div>'
+        +rows
+        +'</div>';
+    }).join("");
+    v.innerHTML=html;
+    document.querySelectorAll(".section-card[data-co]").forEach(function(card){
+      var sp=card.getAttribute("data-co");
+      var inp=card.querySelector(".co-cpm");
+      inp.addEventListener("input",function(){ recalcCard(card); });
+      card.querySelector(".co-save").onclick=function(){ saveCompanyCpm(card); };
+      recalcCard(card);
+    });
+  }).catch(showErr);
+}
+function saveCompanyCpm(card){
+  var sp=card.getAttribute("data-co");
+  var cpm=parseFloat(card.querySelector(".co-cpm").value);
+  if(isNaN(cpm)||cpm<0){ toast("Enter a valid CPM"); return; }
+  var btn=card.querySelector(".co-save"); btn.disabled=true; btn.textContent="Saving…";
+  api("/admin/company-cpm","POST",{ sponsor:sp, cpm:cpm }).then(function(r){
+    btn.disabled=false; btn.textContent="Save rate";
+    var n=(r&&r.updated)||0;
+    toast(n?("Rate saved ("+n+" ad"+(n===1?"":"s")+")"):"Rate saved");
+    STATS=null;
+  }).catch(function(e){ btn.disabled=false; btn.textContent="Save rate"; toast("Failed: "+e.message); });
 }
 
 /* ---- modals ---- */
