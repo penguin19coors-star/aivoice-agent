@@ -2023,6 +2023,61 @@ async def delete_ad_outro(ad_id: str, x_admin_token: Optional[str] = Header(defa
     return {"ok": True}
 
 
+@app.get("/admin/billing")
+async def admin_billing(x_admin_token: Optional[str] = Header(default=None)):
+    check_admin(x_admin_token)
+    companies: Dict[str, Dict[str, Any]] = {}
+    cpm_by_sponsor: Dict[str, float] = {}
+    for ad in AD_DB:
+        sp = (ad.get("sponsor") or "").strip() or "(unknown)"
+        companies.setdefault(sp, {})
+        cpm_by_sponsor.setdefault(sp, float(ad.get("bid_cpm") or 0.0))
+    try:
+        with _db_lock:
+            c = db_conn()
+            rows = c.execute("SELECT sponsor, ts FROM impressions").fetchall()
+        for r in rows:
+            sp = (r["sponsor"] or "").strip() or "(unknown)"
+            try:
+                ym = time.strftime("%Y-%m", time.gmtime(float(r["ts"] or 0)))
+            except Exception:
+                ym = "unknown"
+            m = companies.setdefault(sp, {})
+            m[ym] = m.get(ym, 0) + 1
+    except Exception as e:
+        log.warning(f"[billing] aggregate failed: {e}")
+    out = []
+    for sp, months in companies.items():
+        out.append({
+            "sponsor": sp,
+            "cpm": cpm_by_sponsor.get(sp, 0.0),
+            "months": months,
+            "total_plays": sum(months.values()),
+        })
+    out.sort(key=lambda x: x["sponsor"].lower())
+    return {"companies": out}
+
+
+@app.post("/admin/company-cpm")
+async def set_company_cpm(payload: dict, x_admin_token: Optional[str] = Header(default=None)):
+    check_admin(x_admin_token)
+    sponsor = (payload.get("sponsor") or "").strip() or "(unknown)"
+    try:
+        cpm = float(payload.get("cpm"))
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid cpm")
+    if cpm < 0:
+        raise HTTPException(status_code=400, detail="cpm must be >= 0")
+    updated = 0
+    for ad in AD_DB:
+        sp = (ad.get("sponsor") or "").strip() or "(unknown)"
+        if sp == sponsor:
+            ad["bid_cpm"] = cpm
+            db_save_ad(ad)
+            updated += 1
+    return {"ok": True, "sponsor": sponsor, "cpm": cpm, "updated": updated}
+
+
 @app.get("/icon-192.png")
 async def icon_192():
     return Response(content=ICON_192, media_type="image/png", headers={"Cache-Control": "public, max-age=86400"})
