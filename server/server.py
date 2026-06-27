@@ -60,80 +60,7 @@ log = logging.getLogger("aivoice")
 app = FastAPI(title="AI Voice Agent", version="1.0.0")
 
 # ─── AD INVENTORY ─────────────────────────────────────────────────────────────
-AD_DB: List[Dict[str, Any]] = [
-    {
-        "id": "ad_001",
-        "sponsor": "TechLaunch SaaS",
-        "industry": "technology",
-        "keywords": ["software", "app", "cloud", "ai", "automation", "startup"],
-        "script": "By the way, TechLaunch just released an AI automation tool that lets small teams ship apps 10 times faster. Check them out at techlaunch dot A I.",
-        "cta": "Visit techlaunch.ai",
-        "bid_cpm": 12.50,
-        "daily_cap": 500,
-        "weight": 1.0,
-        "active": True,
-    },
-    {
-        "id": "ad_002",
-        "sponsor": "GreenPower Energy",
-        "industry": "home_services",
-        "keywords": ["electric", "power", "solar", "home", "energy", "bill", "utility"],
-        "script": "Quick tip from GreenPower Energy: switching to solar can cut your electric bill by 60 percent. Ask about their free home assessment.",
-        "cta": "Call GreenPower for a free quote",
-        "bid_cpm": 9.75,
-        "daily_cap": 300,
-        "weight": 1.2,
-        "active": True,
-    },
-    {
-        "id": "ad_003",
-        "sponsor": "FitTrack Rings",
-        "industry": "health",
-        "keywords": ["health", "fitness", "tracker", "wearable", "exercise", "sleep", "steps", "healthy"],
-        "script": "If you're tracking goals, FitTrack's new smart ring monitors sleep, steps, and recovery all day. Now available at fittrack dot com.",
-        "cta": "Shop FitTrack.com",
-        "bid_cpm": 8.50,
-        "daily_cap": 200,
-        "weight": 0.9,
-        "active": True,
-    },
-    {
-        "id": "ad_004",
-        "sponsor": "CloudVPS",
-        "industry": "technology",
-        "keywords": ["server", "cloud", "hosting", "vps", "deploy", "infrastructure", "api", "dev"],
-        "script": "For developers, CloudVPS has bare-metal instances starting at five dollars a month with 99.99 percent uptime. Promo code AI Agent.",
-        "cta": "CloudVPS .dev",
-        "bid_cpm": 7.00,
-        "daily_cap": 100,
-        "weight": 1.5,
-        "active": True,
-    },
-    {
-        "id": "ad_005",
-        "sponsor": "CheapFlights",
-        "industry": "travel",
-        "keywords": ["travel", "flight", "trip", "vacation", "hotel", "book", "airport", "destination"],
-        "script": "Planning a trip? CheapFlights compares 500 airlines to find you under market fares, with price drop alerts for free.",
-        "cta": "Download CheapFlights app",
-        "bid_cpm": 6.25,
-        "daily_cap": 150,
-        "weight": 1.0,
-        "active": True,
-    },
-    {
-        "id": "ad_006",
-        "sponsor": "LegalEase",
-        "industry": "legal",
-        "keywords": ["law", "legal", "lawyer", "contract", "rights", "dispute", "court", "sue"],
-        "script": "Have a small legal question? LegalEase connects you with licensed attorneys in minutes for a flat 29 dollar consult. No firm required.",
-        "cta": "LegalEase dot co",
-        "bid_cpm": 14.00,
-        "daily_cap": 80,
-        "weight": 2.0,
-        "active": True,
-    },
-]
+AD_DB: List[Dict[str, Any]] = []
 
 SEGMENT_TAGS: Dict[str, List[str]] = {}
 
@@ -500,14 +427,19 @@ def select_ad(session: Session) -> Optional[Dict[str, Any]]:
 
     if not candidates:
         return None
-    candidates.sort(key=lambda x: x["score"], reverse=True)
-    best = candidates[0]
     min_relevance = 0.1 if force_min_mode else 0.35
-    if best["relevance"] < min_relevance:
+    # Only ads that actually matched (keyword/industry relevance) are eligible.
+    # Among those the highest bid x relevance wins, so a high-bid ad with no
+    # keyword match can no longer shadow and block a genuinely matched ad.
+    eligible = [c for c in candidates if c["relevance"] >= min_relevance]
+    if not eligible:
         if force_min_mode:
             log.info("[ad] forcing minimum ad due to call duration (relaxed relevance)")
+            eligible = candidates
         else:
             return None
+    eligible.sort(key=lambda x: x["score"], reverse=True)
+    best = eligible[0]
 
     log.info(
         f"[ad] selected {best['ad']['id']} sponsor={best['ad']['sponsor']} "
