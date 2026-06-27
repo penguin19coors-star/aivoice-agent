@@ -155,6 +155,13 @@ def db_init():
         # If the table is empty, no ads will play — the admin must add them via /admin.
         # (Previous behavior re-seeded default ads after every disk wipe,
         # which made it look like "ghost ads" were playing without admin control.)
+        # One-time cleanup: remove any legacy built-in seed ads that an older
+        # build may have persisted to the DB, so they can never play or reappear.
+        _seed_ids = ("ad_001", "ad_002", "ad_003", "ad_004", "ad_005", "ad_006")
+        _purged = c.execute("DELETE FROM ads WHERE id IN (?,?,?,?,?,?)", _seed_ids).rowcount
+        if _purged:
+            c.commit()
+            log.info(f"[db] purged {_purged} legacy seed ad(s) from DB")
         n = c.execute("SELECT COUNT(*) AS n FROM ads").fetchone()["n"]
         if n == 0:
             log.info("[db] ads table is empty — no ads loaded until added via /admin")
