@@ -416,6 +416,14 @@ _caller_ad_history: Dict[str, Dict[str, float]] = {}
 CALLER_AD_REPEAT_SECONDS = 300  # do not replay the same ad to a caller within 5 minutes
 
 
+def _latest_user_text(session) -> str:
+    """The caller's most recent spoken utterance (for keyword/variant matching)."""
+    for m in reversed(session.transcript):
+        if m.get("role") == "user":
+            return (m.get("text") or "").lower()
+    return ""
+
+
 def _recent_caller_ad(caller_id, ad_id, now) -> bool:
     if not caller_id:
         return False
@@ -475,7 +483,7 @@ def select_ad(session: Session) -> Optional[Dict[str, Any]]:
         if play_counts[ad["id"]] >= ad["daily_cap"]:
             continue
 
-        texts = " ".join(m.get("text", "") for m in session.transcript[-6:]).lower()
+        texts = _latest_user_text(session)
         _all_kw = list(ad.get("keywords", []) or [])
         for _v in (ad.get("variants", []) or []):
             _all_kw.extend(_v.get("keywords", []) or [])
@@ -543,7 +551,7 @@ def pick_ad_script(ad: Dict[str, Any], session: Session) -> str:
     variants = ad.get("variants") or []
     if not variants:
         return ad["script"]
-    texts = " ".join(m.get("text", "") for m in session.transcript[-6:]).lower()
+    texts = _latest_user_text(session)
     best_script = ad["script"]
     best_hits = 0
     for v in variants:
@@ -564,7 +572,7 @@ def pick_ad_variation(ad: Dict[str, Any], session: Session, now: float):
     (script, variation_key). Returns (None, None) if that exact variation was
     already played to this caller within CALLER_AD_REPEAT_SECONDS, so the same
     variation is not repeated while OTHER variations can still play."""
-    texts = " ".join(m.get("text", "") for m in session.transcript[-6:]).lower()
+    texts = _latest_user_text(session)
     best_hits = 0
     best_script = ad.get("script", "")
     for v in (ad.get("variants") or []):
@@ -1747,6 +1755,11 @@ async def process_speech(chunk: bytes, session: Session, ws: WebSocket, stream_s
     MIN_UTTERANCE_BYTES = 4000  # ~0.5s of 8kHz µ-law before we bother transcribing
     SILENCE_GAP = 0.7          # seconds of silence that ends an utterance
 
+    if time.time() < session.metadata.get("suppress_until", 0.0):
+        # Ad (incl. outro) is playing: ignore caller audio so it is not taken as a request.
+        session.audio_buffer = bytearray()
+        session.in_speech = False
+        return
     session.audio_buffer.extend(chunk)
 
     if rms >= SILENCE_RMS:
@@ -1813,11 +1826,17 @@ async def _handle_utterance(utterance: bytes, session: Session, ws: WebSocket, s
                     await send_fn(ps_ad, (CARTESIA_AD_VOICE or None), prefix_ulaw=(AD_CUE_ULAW or None), suffix_ulaw=AD_OUTRO_GLOBAL_ULAW)
             ad_first = bool(ad_line)
             if ad_first:
-                # Play the matched ad BEFORE the reply so it never overlaps a follow-up/clarify question or the caller's response.
+                # Play the matched ad BEFORE the reply. Suppress caller input during the ad +
+                # outro so anything they say then is not captured as a (desyncing) request.
+                session.metadata["suppress_until"] = time.time() + 3600
+                session.audio_buffer = bytearray()
                 try:
                     await send_fn(ad_line, (CARTESIA_AD_VOICE or None), prefix_ulaw=(AD_CUE_ULAW or None), suffix_ulaw=AD_OUTRO_GLOBAL_ULAW)
                 except Exception as _ae:
                     log.warning(f"[ad] pre-answer ad playback failed: {_ae}")
+                # Outro finished: reopen input shortly after, from a clean buffer.
+                session.metadata["suppress_until"] = time.time() + 1.2
+                session.audio_buffer = bytearray()
             if reply:
                 await send_fn(reply)
 
