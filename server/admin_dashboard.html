@@ -181,7 +181,7 @@
       <div class="nav" data-sec="overview"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9"/><rect x="14" y="3" width="7" height="5"/><rect x="14" y="12" width="7" height="9"/><rect x="3" y="16" width="7" height="5"/></svg><span class="nname">Overview</span></div>
       <div class="nav" data-sec="ads"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l18-5v12L3 14v-3z"/><path d="M11.6 16.8a3 3 0 1 1-5.8-1.6"/></svg><span class="nname">Ads</span></div>
       <div class="nav" data-sec="frequency"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg><span class="nname">Frequency</span></div>
-      <div class="nav" data-sec="cue"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg><span class="nname">Ad Intro Sound</span></div>
+      <div class="nav" data-sec="cue"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg><span class="nname">Intro/Outro</span></div>
       <div class="nav-section">Revenue</div>
       <div class="nav" data-sec="billing"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg><span class="nname">Billing</span></div>
     </div>
@@ -266,7 +266,7 @@ function unlock(){
 function openNav(){ $("sidebar").classList.add("open"); $("overlay").classList.add("show"); }
 function closeNav(){ $("sidebar").classList.remove("open"); $("overlay").classList.remove("show"); }
 
-var TITLES={ overview:"Overview", ads:"Ads", frequency:"Ad Frequency", cue:"Ad Intro Sound", billing:"Billing" };
+var TITLES={ overview:"Overview", ads:"Ads", frequency:"Ad Frequency", cue:"Intro/Outro", billing:"Billing" };
 function show(sec){
   SECTION=sec; closeNav();
   $("pageTitle").textContent=TITLES[sec]||sec;
@@ -371,29 +371,12 @@ function adModal(ad){
     +'<div class="field"><label>Daily cap</label><input type="number" id="f_cap" value="'+(ad.daily_cap!=null?ad.daily_cap:100)+'"></div>'
     +'<div class="field"><label>Weight</label><input type="number" step="0.1" id="f_weight" value="'+(ad.weight!=null?ad.weight:1)+'"></div></div>'
     +'<div class="field"><label>Variants (optional A/B scripts)</label><div class="hint" style="margin:-2px 0 8px;">Each variant can be toggled for Start-of-call (rotated in turn) and/or used elsewhere.</div><div id="varList"></div><button class="btn sm" id="addVar" type="button">+ Add variant</button></div>'
-    +(isEdit?('<div class="field"><label>Outro sound &mdash; plays right after this ad'+(ad.outro_set?' (<span style="color:var(--green)">set</span>)':'')+'</label><input type="file" id="f_outro" accept="audio/mpeg,audio/*"><div class="row" style="margin-top:8px;gap:8px;"><button class="btn sm" type="button" id="outroUp">Upload outro</button>'+(ad.outro_set?'<button class="btn sm red" type="button" id="outroRm">Remove outro</button>':'')+'</div></div>'):'')
     +'<div class="modal-actions"><button class="btn" id="cancelBtn">Cancel</button><button class="btn primary" id="saveBtn">'+(isEdit?"Save changes":"Create ad")+'</button></div>';
   openModal(html);
   vars.forEach(addVariantRow);
   $("addVar").onclick=function(){ addVariantRow({keywords:[],script:""}); };
   $("cancelBtn").onclick=closeModal;
   $("saveBtn").onclick=function(){ saveAd(isEdit?ad.id:null); };
-  if(isEdit){
-    var ou=$("outroUp"); if(ou) ou.onclick=function(){ uploadOutro(ad.id); };
-    var orm=$("outroRm"); if(orm) orm.onclick=function(){ api("/admin/ads/"+encodeURIComponent(ad.id)+"/outro","DELETE").then(function(){ toast("Outro removed"); STATS=null; if(orm)orm.remove(); }).catch(function(e){ toast("Failed: "+e.message); }); };
-  }
-}
-function uploadOutro(id){
-  var el=$("f_outro"); var f=el&&el.files&&el.files[0];
-  if(!f){ toast("Choose an MP3 first"); return; }
-  var b=$("outroUp"); b.disabled=true; b.textContent="Uploading…";
-  var rd=new FileReader();
-  rd.onload=function(){
-    var b64=String(rd.result).split(",")[1];
-    api("/admin/ads/"+encodeURIComponent(id)+"/outro","POST",{ mp3_b64:b64 }).then(function(){ b.disabled=false; b.textContent="Upload outro"; toast("Outro saved"); STATS=null; })
-      .catch(function(e){ b.disabled=false; b.textContent="Upload outro"; toast("Failed: "+e.message); });
-  };
-  rd.readAsDataURL(f);
 }
 function addVariantRow(v){
   v=v||{keywords:[],script:""};
@@ -466,32 +449,39 @@ function renderFrequency(){
   }).catch(showErr);
 }
 
-/* ---- cue ---- */
+/* ---- intro / outro ---- */
 function renderCue(){
   var v=$("view"); v.innerHTML='<div class="loading">loading…</div>';
-  api("/admin/ad-cue","GET").then(function(d){
-    var set=d&&d.set;
-    var html='<div class="section-card"><h3>Ad Intro Sound</h3>'
-      +'<div class="muted" style="margin-bottom:14px;">Upload a short MP3 that plays right before <b>every</b> ad, so callers know a sponsor message is coming. Converted once on upload &mdash; no per-call cost.</div>'
-      +'<div class="row" style="margin-bottom:16px;">'+(set
-        ? '<span class="badge b-green"><span class="dot"></span>SOUND SET</span><span class="dim">'+(d.seconds||0)+'s</span>'
-        : '<span class="badge b-gray"><span class="dot"></span>NO SOUND</span><span class="dim">ads play with no intro</span>')+'</div>'
-      +'<div class="field"><input type="file" id="cueFile" accept="audio/mpeg,audio/*"></div>'
-      +'<div class="row"><button class="btn primary" id="cueUp">Upload</button>'+(set?'<button class="btn red" id="cueRm">Remove</button>':'')+'</div>'
-      +'</div>';
+  Promise.all([api("/admin/ad-cue","GET"), api("/admin/ad-outro","GET")]).then(function(res){
+    var cue=res[0]||{}, outro=res[1]||{};
+    function block(title, desc, set, secs, fileId, upId, rmId){
+      return '<div class="section-card"><h3>'+title+'</h3>'
+        +'<div class="muted" style="margin-bottom:14px;">'+desc+'</div>'
+        +'<div class="row" style="margin-bottom:16px;">'+(set
+          ? '<span class="badge b-green"><span class="dot"></span>SOUND SET</span><span class="dim">'+(secs||0)+'s</span>'
+          : '<span class="badge b-gray"><span class="dot"></span>NO SOUND</span>')+'</div>'
+        +'<div class="field"><input type="file" id="'+fileId+'" accept="audio/mpeg,audio/*"></div>'
+        +'<div class="row"><button class="btn primary" id="'+upId+'">Upload</button>'+(set?'<button class="btn red" id="'+rmId+'">Remove</button>':'')+'</div>'
+        +'</div>';
+    }
+    var html='<div class="muted" style="margin-bottom:14px;">These sounds are shared by <b>every</b> ad. The intro plays right before each ad and the outro right after. Converted once on upload &mdash; no per-call cost.</div>'
+      +block("Intro sound","Plays right before every ad, so callers know a sponsor message is coming.", cue.set, cue.seconds, "cueFile","cueUp","cueRm")
+      +block("Outro sound","Plays right after every ad.", outro.set, outro.seconds, "outroFile","outroUpG","outroRmG");
     v.innerHTML=html;
-    $("cueUp").onclick=uploadCue;
-    if($("cueRm")) $("cueRm").onclick=function(){ api("/admin/ad-cue","DELETE").then(function(){ toast("Removed"); renderCue(); }).catch(function(e){ toast("Failed: "+e.message); }); };
+    $("cueUp").onclick=function(){ uploadSound("cueFile","cueUp","/admin/ad-cue"); };
+    if($("cueRm")) $("cueRm").onclick=function(){ api("/admin/ad-cue","DELETE").then(function(){ toast("Intro removed"); renderCue(); }).catch(function(e){ toast("Failed: "+e.message); }); };
+    $("outroUpG").onclick=function(){ uploadSound("outroFile","outroUpG","/admin/ad-outro"); };
+    if($("outroRmG")) $("outroRmG").onclick=function(){ api("/admin/ad-outro","DELETE").then(function(){ toast("Outro removed"); renderCue(); }).catch(function(e){ toast("Failed: "+e.message); }); };
   }).catch(showErr);
 }
-function uploadCue(){
-  var el=$("cueFile"); var f=el&&el.files&&el.files[0];
+function uploadSound(fileId, btnId, path){
+  var el=$(fileId); var f=el&&el.files&&el.files[0];
   if(!f){ toast("Choose an MP3 first"); return; }
-  var b=$("cueUp"); b.disabled=true; b.textContent="Uploading…";
+  var b=$(btnId); b.disabled=true; b.textContent="Uploading…";
   var rd=new FileReader();
   rd.onload=function(){
     var b64=String(rd.result).split(",")[1];
-    api("/admin/ad-cue","POST",{ mp3_b64:b64 }).then(function(){ toast("Intro sound saved"); renderCue(); })
+    api(path,"POST",{ mp3_b64:b64 }).then(function(){ toast("Saved"); renderCue(); })
       .catch(function(e){ b.disabled=false; b.textContent="Upload"; toast("Failed: "+e.message); });
   };
   rd.readAsDataURL(f);
