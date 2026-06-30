@@ -410,6 +410,23 @@ def classify_industry(transcript: List[Dict]) -> Dict[str, float]:
     return {k: v / total for k, v in scores.items()}
 
 
+# Per-caller recent ad plays (caller_id -> {ad_id: last_play_ts}); avoids
+# replaying the same ad to the same caller within a short window.
+_caller_ad_history: Dict[str, Dict[str, float]] = {}
+CALLER_AD_REPEAT_SECONDS = 300  # do not replay the same ad to a caller within 5 minutes
+
+
+def _recent_caller_ad(caller_id, ad_id, now) -> bool:
+    if not caller_id:
+        return False
+    return (now - _caller_ad_history.get(caller_id, {}).get(ad_id, 0)) < CALLER_AD_REPEAT_SECONDS
+
+
+def _record_caller_ad(caller_id, ad_id, now) -> None:
+    if caller_id:
+        _caller_ad_history.setdefault(caller_id, {})[ad_id] = now
+
+
 def select_ad(session: Session) -> Optional[Dict[str, Any]]:
     """Select the best ad for this moment using configurable frequency controls.
 
@@ -458,6 +475,8 @@ def select_ad(session: Session) -> Optional[Dict[str, Any]]:
             continue
         if play_counts[ad["id"]] >= ad["daily_cap"]:
             continue
+        if _recent_caller_ad(session.caller_id, ad["id"], now):
+            continue  # already played this ad to this caller recently
 
         texts = " ".join(m.get("text", "") for m in session.transcript[-6:]).lower()
         keyword_hits = sum(1 for kw in ad["keywords"] if kw.lower() in texts)
@@ -479,6 +498,7 @@ def select_ad(session: Session) -> Optional[Dict[str, Any]]:
             log.info("[ad] forcing minimum ad due to call duration (relaxed relevance)")
             eligible = candidates
         else:
+            log.info(f"[ad] no match: candidates={len(candidates)} best_rel={(max((c['relevance'] for c in candidates), default=0.0)):.2f}")
             return None
     eligible.sort(key=lambda x: x["score"], reverse=True)
     best = eligible[0]
@@ -583,6 +603,7 @@ def maybe_inject_ad(session: Session) -> Optional[str]:
         session.last_ad_at = now
         session.ad_play_times.append(now)   # for rolling window frequency control
         record_play(ad["id"], session.session_id, session.caller_id)
+        _record_caller_ad(session.caller_id, ad["id"], now)
         session.metadata["pending_ad_id"] = ad["id"]
         return pick_ad_script({**ad, "variants": [v for v in ad.get("variants", []) if v.get("other_enabled", True)]}, session)
     return None
@@ -1764,7 +1785,10 @@ async def _handle_utterance(utterance: bytes, session: Session, ws: WebSocket, s
             ad_first = bool(ad_line) and did_search
             if ad_first:
                 # Web lookup happened: play the matched ad BEFORE the answer so the caller must hear it.
-                await send_fn(ad_line, (CARTESIA_AD_VOICE or None), prefix_ulaw=(AD_CUE_ULAW or None), suffix_ulaw=AD_OUTRO_GLOBAL_ULAW)
+                try:
+                    await send_fn(ad_line, (CARTESIA_AD_VOICE or None), prefix_ulaw=(AD_CUE_ULAW or None), suffix_ulaw=AD_OUTRO_GLOBAL_ULAW)
+                except Exception as _ae:
+                    log.warning(f"[ad] pre-answer ad playback failed: {_ae}")
             if reply:
                 await send_fn(reply)
 
