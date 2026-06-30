@@ -1785,9 +1785,9 @@ async def _handle_utterance(utterance: bytes, session: Session, ws: WebSocket, s
                 ps_ad = play_placement_ad_lines(session, "post_search")
                 if ps_ad:
                     await send_fn(ps_ad, (CARTESIA_AD_VOICE or None), prefix_ulaw=(AD_CUE_ULAW or None), suffix_ulaw=AD_OUTRO_GLOBAL_ULAW)
-            ad_first = bool(ad_line) and did_search
+            ad_first = bool(ad_line)
             if ad_first:
-                # Web lookup happened: play the matched ad BEFORE the answer so the caller must hear it.
+                # Play the matched ad BEFORE the reply so it never overlaps a follow-up/clarify question or the caller's response.
                 try:
                     await send_fn(ad_line, (CARTESIA_AD_VOICE or None), prefix_ulaw=(AD_CUE_ULAW or None), suffix_ulaw=AD_OUTRO_GLOBAL_ULAW)
                 except Exception as _ae:
