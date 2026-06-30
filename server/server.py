@@ -5,6 +5,7 @@ AI Voice Agent Server for paid ad-supported phone calls.
 Routes: Twilio Voice → WebSocket → [Deepgram STT] → [LLM + Ad Matching] → [TTS] → Twilio
 """
 import os
+import random
 import re
 import json
 import uuid
