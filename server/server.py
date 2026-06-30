@@ -133,6 +133,10 @@ def db_init():
                 key TEXT PRIMARY KEY,
                 value TEXT
             );
+            CREATE TABLE IF NOT EXISTS calls (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT, caller_id TEXT, ts REAL
+            );
             """
         )
         c.commit()
@@ -245,6 +249,36 @@ def db_delete_ad(ad_id: str):
         c = db_conn()
         c.execute("DELETE FROM ads WHERE id=?", (ad_id,))
         c.commit()
+
+
+def record_call(session_id: str, caller_id: Optional[str]):
+    """Log one inbound call for time-window analytics."""
+    try:
+        with _db_lock:
+            c = db_conn()
+            c.execute(
+                "INSERT INTO calls (session_id, caller_id, ts) VALUES (?,?,?)",
+                (session_id, caller_id, time.time()),
+            )
+            c.commit()
+    except Exception as e:
+        log.warning(f"[calls] record failed: {e}")
+
+
+def call_counts() -> Dict[str, int]:
+    """Number of inbound calls within rolling time windows."""
+    now = time.time()
+    windows = {"h24": 86400, "d3": 259200, "d7": 604800, "d14": 1209600, "d30": 2592000}
+    out = {}
+    try:
+        with _db_lock:
+            c = db_conn()
+            for k, secs in windows.items():
+                out[k] = c.execute("SELECT COUNT(*) FROM calls WHERE ts >= ?", (now - secs,)).fetchone()[0]
+    except Exception as e:
+        log.warning(f"[calls] count failed: {e}")
+        out = {k: 0 for k in windows}
+    return out
 
 
 def db_insert_impression(record: Dict[str, Any]):
@@ -426,9 +460,9 @@ def select_ad(session: Session) -> Optional[Dict[str, Any]]:
 
         texts = " ".join(m.get("text", "") for m in session.transcript[-6:]).lower()
         keyword_hits = sum(1 for kw in ad["keywords"] if kw.lower() in texts)
-        relevance = 0.2 + 0.6 * min(1.0, keyword_hits / max(1, len(ad["keywords"]) * 0.4))
+        relevance = min(1.0, 0.6 + 0.1 * keyword_hits) if keyword_hits > 0 else 0.15
         if ad["industry"] in context:
-            relevance += 0.3 * context[ad["industry"]]
+            relevance = min(1.0, relevance + (0.3 if keyword_hits > 0 else 0.15) * context[ad["industry"]])
         score = ad["bid_cpm"] * ad["weight"] * max(0.3, relevance)
         candidates.append({"ad": ad, "score": score, "relevance": relevance})
 
@@ -877,7 +911,7 @@ async def telnyx_hangup(call_control_id: str):
             return http.post(
                 f"https://api.telnyx.com/v2/calls/{call_control_id}/actions/hangup",
                 headers={"Authorization": f"Bearer {TELNYX_API_KEY}", "Content-Type": "application/json"},
-                json={"client_state": "silence_timeout"},
+                json={},
                 timeout=10,
             )
         r = await asyncio.to_thread(_do_hangup)
@@ -1430,6 +1464,8 @@ async def telnyx_websocket_endpoint(websocket: WebSocket):
                         f"call_control_id={call_control_id} caller={caller_num} "
                         f"encoding={encoding} rate={sample_rate}"
                     )
+                    # Log this inbound call (for call-count analytics).
+                    record_call(session.session_id, caller_num)
                     # Start the silence watchdog (hangs up after N seconds idle).
                     asyncio.create_task(_silence_watchdog())
                     # Greet the caller immediately so the call doesn't open silent.
@@ -1850,6 +1886,7 @@ async def admin_stats(x_admin_token: Optional[str] = Header(default=None)):
             "total_ads": len(AD_DB),
             "sessions_active": len(sessions),
             "impressions_logged": len(impression_log),
+            "calls": call_counts(),
         },
         "ads": per_ad,
         "recent_impressions": list(reversed(impression_log[-25:])),
