@@ -446,9 +446,8 @@ def select_ad(session: Session) -> Optional[Dict[str, Any]]:
     force_after = FREQUENCY.get("force_min_ads_after_seconds", 300)
     min_target = FREQUENCY.get("min_ads_target", 1)
 
-    # 1. Enforce minimum spacing between ads in this call
-    if session.last_ad_at > 0 and (now - session.last_ad_at) < min_int:
-        return None
+    # (Spacing between ads is governed by the per-variation 5-min cooldown so
+    #  different variations can play back-to-back; max_ads still caps density.)
 
     # 2. Enforce maximum ads in a rolling time window (based on call/phone time)
     if max_ads > 0 and window > 0:
@@ -475,8 +474,6 @@ def select_ad(session: Session) -> Optional[Dict[str, Any]]:
             continue
         if play_counts[ad["id"]] >= ad["daily_cap"]:
             continue
-        if _recent_caller_ad(session.caller_id, ad["id"], now):
-            continue  # already played this ad to this caller recently
 
         texts = " ".join(m.get("text", "") for m in session.transcript[-6:]).lower()
         _all_kw = list(ad.get("keywords", []) or [])
@@ -558,6 +555,31 @@ def pick_ad_script(ad: Dict[str, Any], session: Session) -> str:
     return best_script
 
 
+def _variation_key(ad_id, script):
+    return str(ad_id) + "|" + _hashlib.md5((script or "").encode("utf-8")).hexdigest()[:10]
+
+
+def pick_ad_variation(ad: Dict[str, Any], session: Session, now: float):
+    """Pick the best keyword-matching variation for this ad; return
+    (script, variation_key). Returns (None, None) if that exact variation was
+    already played to this caller within CALLER_AD_REPEAT_SECONDS, so the same
+    variation is not repeated while OTHER variations can still play."""
+    texts = " ".join(m.get("text", "") for m in session.transcript[-6:]).lower()
+    best_hits = 0
+    best_script = ad.get("script", "")
+    for v in (ad.get("variants") or []):
+        if not v.get("other_enabled", True):
+            continue
+        hits = sum(1 for kw in (v.get("keywords", []) or []) if kw and str(kw).lower() in texts)
+        if hits > best_hits:
+            best_hits = hits
+            best_script = v.get("script") or ad.get("script", "")
+    key = _variation_key(ad["id"], best_script)
+    if _recent_caller_ad(session.caller_id, key, now):
+        return None, None
+    return best_script, key
+
+
 _placement_rotation: Dict[str, int] = {}
 
 
@@ -600,16 +622,20 @@ def play_placement_ad_lines(session: Session, placement: str) -> Optional[str]:
 
 def maybe_inject_ad(session: Session) -> Optional[str]:
     ad = select_ad(session)
-    if ad:
-        now = time.time()
-        session.ads_played.append(ad["id"])
-        session.last_ad_at = now
-        session.ad_play_times.append(now)   # for rolling window frequency control
-        record_play(ad["id"], session.session_id, session.caller_id)
-        _record_caller_ad(session.caller_id, ad["id"], now)
-        session.metadata["pending_ad_id"] = ad["id"]
-        return pick_ad_script({**ad, "variants": [v for v in ad.get("variants", []) if v.get("other_enabled", True)]}, session)
-    return None
+    if not ad:
+        return None
+    now = time.time()
+    script, vkey = pick_ad_variation(ad, session, now)
+    if not script:
+        log.info(f"[ad] skipped {ad['id']}: this variation already played to caller within 5 min")
+        return None
+    session.ads_played.append(ad["id"])
+    session.last_ad_at = now
+    session.ad_play_times.append(now)   # rolling-window density cap
+    record_play(ad["id"], session.session_id, session.caller_id)
+    _record_caller_ad(session.caller_id, vkey, now)   # cooldown is per-variation
+    session.metadata["pending_ad_id"] = ad["id"]
+    return script
 
 def build_post_ad_bridge(last_user_text: str) -> str:
     """After an ad plays, create a short, natural bridge that re-engages the user
