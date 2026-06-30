@@ -304,6 +304,14 @@ function renderOverview(){
       +statCard("Live Sessions", String(t.sessions_active!=null?t.sessions_active:"—"))
       +statCard("Impressions", String(t.impressions_logged!=null?t.impressions_logged:"—"))
       +'</div>';
+    var calls=t.calls||{};
+    html+='<div class="section-card"><h3>Calls Received</h3><div class="grid stats" style="margin-bottom:0;">'
+      +statCard("Last 24 hours", String(calls.h24!=null?calls.h24:"—"))
+      +statCard("Last 3 days", String(calls.d3!=null?calls.d3:"—"))
+      +statCard("Last 7 days", String(calls.d7!=null?calls.d7:"—"))
+      +statCard("Last 14 days", String(calls.d14!=null?calls.d14:"—"))
+      +statCard("Last 30 days", String(calls.d30!=null?calls.d30:"—"))
+      +'</div></div>';
     var ads=(d.ads||[]).slice().sort(function(a,b){ return (b.plays||0)-(a.plays||0); }).slice(0,5);
     html+='<div class="section-card"><h3>Top Ads by Plays</h3>';
     if(!ads.length){ html+='<div class="muted">No ads yet. Add one in the Ads tab.</div>'; }
