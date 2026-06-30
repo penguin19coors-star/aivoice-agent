@@ -449,13 +449,6 @@ def select_ad(session: Session) -> Optional[Dict[str, Any]]:
         force_min_mode = True
 
     context = session.topic_extract or classify_industry(session.transcript)
-    _dbg = " ".join(m.get("text", "") for m in session.transcript[-6:]).lower()
-    try:
-        log.info("[ad-debug] heard=" + repr(_dbg[-140:]) + " | inv=" + " || ".join(
-            str(a.get("id")) + " act=" + str(a.get("active")) + " place=" + str(a.get("placement", "none")) + " cap=" + str(a.get("daily_cap")) + " plays=" + str(play_counts.get(a.get("id"), 0)) + " hits=" + str(sum(1 for kw in (a.get("keywords") or []) if str(kw).lower() in _dbg)) + " kw=" + str(a.get("keywords"))
-            for a in AD_DB))
-    except Exception as _e:
-        log.warning("[ad-debug] failed: " + str(_e))
 
     candidates = []
     for ad in AD_DB:
@@ -1734,10 +1727,14 @@ async def _handle_utterance(utterance: bytes, session: Session, ws: WebSocket, s
                 ps_ad = play_placement_ad_lines(session, "post_search")
                 if ps_ad:
                     await send_fn(ps_ad, (CARTESIA_AD_VOICE or None), prefix_ulaw=(AD_CUE_ULAW or None), suffix_ulaw=AD_OUTRO_ULAW.get(session.metadata.get("pending_ad_id")))
+            ad_first = bool(ad_line) and did_search
+            if ad_first:
+                # Web lookup happened: play the matched ad BEFORE the answer so the caller must hear it.
+                await send_fn(ad_line, (CARTESIA_AD_VOICE or None), prefix_ulaw=(AD_CUE_ULAW or None), suffix_ulaw=AD_OUTRO_ULAW.get(session.metadata.get("pending_ad_id")))
             if reply:
                 await send_fn(reply)
 
-            if ad_line:
+            if ad_line and not ad_first:
                 # Pre-ad cue so the caller knows a sponsor message is coming
 
                 # The actual ad script (separate voice)
