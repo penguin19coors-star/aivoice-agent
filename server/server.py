@@ -479,7 +479,10 @@ def select_ad(session: Session) -> Optional[Dict[str, Any]]:
             continue  # already played this ad to this caller recently
 
         texts = " ".join(m.get("text", "") for m in session.transcript[-6:]).lower()
-        keyword_hits = sum(1 for kw in ad["keywords"] if kw.lower() in texts)
+        _all_kw = list(ad.get("keywords", []) or [])
+        for _v in (ad.get("variants", []) or []):
+            _all_kw.extend(_v.get("keywords", []) or [])
+        keyword_hits = sum(1 for kw in _all_kw if kw and str(kw).lower() in texts)
         relevance = min(1.0, 0.6 + 0.1 * keyword_hits) if keyword_hits > 0 else 0.15
         if ad["industry"] in context:
             relevance = min(1.0, relevance + (0.3 if keyword_hits > 0 else 0.15) * context[ad["industry"]])
