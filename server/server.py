@@ -846,6 +846,40 @@ def clear_ad_cue() -> None:
     except FileNotFoundError:
         pass
 
+AD_OUTRO_GLOBAL_PATH = os.path.join(os.environ.get("DATA_DIR", "/var/data"), "ad_outro.ulaw")
+AD_OUTRO_GLOBAL_ULAW: Optional[bytes] = None
+
+
+def load_ad_outro() -> None:
+    global AD_OUTRO_GLOBAL_ULAW
+    try:
+        with open(AD_OUTRO_GLOBAL_PATH, "rb") as f:
+            AD_OUTRO_GLOBAL_ULAW = f.read()
+        log.info(f"[cue] loaded ad outro ({len(AD_OUTRO_GLOBAL_ULAW)} bytes mu-law)")
+    except FileNotFoundError:
+        AD_OUTRO_GLOBAL_ULAW = None
+    except Exception as e:
+        AD_OUTRO_GLOBAL_ULAW = None
+        log.warning(f"[cue] outro load failed: {e}")
+
+
+def save_ad_outro(ulaw: bytes) -> None:
+    global AD_OUTRO_GLOBAL_ULAW
+    os.makedirs(os.path.dirname(AD_OUTRO_GLOBAL_PATH), exist_ok=True)
+    with open(AD_OUTRO_GLOBAL_PATH, "wb") as f:
+        f.write(ulaw)
+    AD_OUTRO_GLOBAL_ULAW = ulaw
+
+
+def clear_ad_outro() -> None:
+    global AD_OUTRO_GLOBAL_ULAW
+    AD_OUTRO_GLOBAL_ULAW = None
+    try:
+        os.remove(AD_OUTRO_GLOBAL_PATH)
+    except FileNotFoundError:
+        pass
+
+
 # Ad frequency controls (per call / phone time)
 # These let you control how many ads are played relative to call duration.
 # Runtime frequency settings (can be overridden from /admin dashboard)
@@ -1478,7 +1512,7 @@ async def telnyx_websocket_endpoint(websocket: WebSocket):
                     async def _intro():
                         start_ad = play_placement_ad_lines(session, "start")
                         if start_ad:
-                            await _send_outbound(start_ad, (CARTESIA_AD_VOICE or None), suffix_ulaw=AD_OUTRO_ULAW.get(session.metadata.get("pending_ad_id")))
+                            await _send_outbound(start_ad, (CARTESIA_AD_VOICE or None), suffix_ulaw=AD_OUTRO_GLOBAL_ULAW)
                         await _send_outbound(greeting)
                     asyncio.create_task(_intro())
 
@@ -1726,11 +1760,11 @@ async def _handle_utterance(utterance: bytes, session: Session, ws: WebSocket, s
             if did_search:
                 ps_ad = play_placement_ad_lines(session, "post_search")
                 if ps_ad:
-                    await send_fn(ps_ad, (CARTESIA_AD_VOICE or None), prefix_ulaw=(AD_CUE_ULAW or None), suffix_ulaw=AD_OUTRO_ULAW.get(session.metadata.get("pending_ad_id")))
+                    await send_fn(ps_ad, (CARTESIA_AD_VOICE or None), prefix_ulaw=(AD_CUE_ULAW or None), suffix_ulaw=AD_OUTRO_GLOBAL_ULAW)
             ad_first = bool(ad_line) and did_search
             if ad_first:
                 # Web lookup happened: play the matched ad BEFORE the answer so the caller must hear it.
-                await send_fn(ad_line, (CARTESIA_AD_VOICE or None), prefix_ulaw=(AD_CUE_ULAW or None), suffix_ulaw=AD_OUTRO_ULAW.get(session.metadata.get("pending_ad_id")))
+                await send_fn(ad_line, (CARTESIA_AD_VOICE or None), prefix_ulaw=(AD_CUE_ULAW or None), suffix_ulaw=AD_OUTRO_GLOBAL_ULAW)
             if reply:
                 await send_fn(reply)
 
@@ -1738,7 +1772,7 @@ async def _handle_utterance(utterance: bytes, session: Session, ws: WebSocket, s
                 # Pre-ad cue so the caller knows a sponsor message is coming
 
                 # The actual ad script (separate voice)
-                await send_fn(ad_line, (CARTESIA_AD_VOICE or None), prefix_ulaw=(AD_CUE_ULAW or None), suffix_ulaw=AD_OUTRO_ULAW.get(session.metadata.get("pending_ad_id")))
+                await send_fn(ad_line, (CARTESIA_AD_VOICE or None), prefix_ulaw=(AD_CUE_ULAW or None), suffix_ulaw=AD_OUTRO_GLOBAL_ULAW)
 
                 # Post-ad bridge: re-engage with the original question to keep
                 # momentum, especially useful for search / factual conversations.
@@ -1929,6 +1963,44 @@ async def update_settings(payload: dict, x_admin_token: Optional[str] = Header(d
     log.info(f"[settings] updated: {updated}  current FREQUENCY={FREQUENCY}")
     return {"updated": updated, "current": dict(FREQUENCY)}
 
+
+
+@app.post("/admin/ad-outro")
+async def upload_ad_outro_global(payload: dict, x_admin_token: Optional[str] = Header(default=None)):
+    check_admin(x_admin_token)
+    b64 = (payload.get("mp3_b64") or payload.get("b64") or "").strip()
+    if "," in b64 and b64[:5].lower() == "data:":
+        b64 = b64.split(",", 1)[1]
+    b64 = re.sub(r"\s+", "", b64).replace("-", "+").replace("_", "/")
+    if len(b64) % 4:
+        b64 += "=" * (4 - len(b64) % 4)
+    try:
+        raw = _b64.b64decode(b64)
+    except Exception as e:
+        raise HTTPException(400, f"invalid base64 audio: {e}")
+    if not raw:
+        raise HTTPException(400, "empty audio")
+    try:
+        ulaw = _decode_audio_to_ulaw(raw)
+    except Exception as e:
+        raise HTTPException(400, f"could not decode audio: {e}")
+    save_ad_outro(ulaw)
+    log.info(f"[cue] uploaded ad outro ({len(ulaw)} bytes)")
+    return {"ok": True, "bytes": len(ulaw), "seconds": round(len(ulaw) / 8000.0, 2)}
+
+
+@app.get("/admin/ad-outro")
+async def get_ad_outro_global(x_admin_token: Optional[str] = Header(default=None)):
+    check_admin(x_admin_token)
+    n = len(AD_OUTRO_GLOBAL_ULAW) if AD_OUTRO_GLOBAL_ULAW else 0
+    return {"set": n > 0, "bytes": n, "seconds": round(n / 8000.0, 2)}
+
+
+@app.delete("/admin/ad-outro")
+async def remove_ad_outro_global(x_admin_token: Optional[str] = Header(default=None)):
+    check_admin(x_admin_token)
+    clear_ad_outro()
+    return {"ok": True}
 
 
 @app.post("/admin/ad-cue")
@@ -2174,6 +2246,7 @@ async def _on_startup():
         db_init()
         load_ad_cue()
         load_ad_outros()
+        load_ad_outro()
     except Exception as exc:
         log.error(f"[db] init failed: {exc} — running with in-memory state only")
 
