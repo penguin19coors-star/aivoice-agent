@@ -457,12 +457,8 @@ def select_ad(session: Session) -> Optional[Dict[str, Any]]:
     # (Spacing between ads is governed by the per-variation 5-min cooldown so
     #  different variations can play back-to-back; max_ads still caps density.)
 
-    # 2. Enforce maximum ads in a rolling time window (based on call/phone time)
-    if max_ads > 0 and window > 0:
-        window_start = now - window
-        recent_ads = [t for t in session.ad_play_times if t >= window_start]
-        if len(recent_ads) >= max_ads:
-            return None
+    # 2. (Per-call max-ads window cap removed. The per-variation 5-min cooldown and
+    #    each ad's daily_cap govern ad frequency, so distinct requests are not throttled.)
 
     # 3. Force minimum ads after X minutes of call time
     # If the call has been going long enough and we haven't hit the minimum yet,
