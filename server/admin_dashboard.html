@@ -326,6 +326,7 @@ function renderOverview(){
 /* ---- ads ---- */
 function placementBadge(p){
   if(p==="start") return '<span class="badge b-cyan"><span class="dot"></span>START OF CALL</span>';
+  if(p==="start_keyword") return '<span class="badge b-cyan"><span class="dot"></span>START + KEYWORD</span>';
   if(p==="post_search") return '<span class="badge b-teal"><span class="dot"></span>AFTER WEB SEARCH</span>';
   return '<span class="badge b-gray"><span class="dot"></span>KEYWORD</span>';
 }
@@ -366,7 +367,7 @@ function adModal(ad){
     +'<div class="field"><label>Industry</label><input type="text" id="f_industry" value="'+esc(ad.industry||"")+'" placeholder="technology, travel…"></div></div>'
     +'<div class="field"><label>Script (what the assistant reads)</label><textarea id="f_script" placeholder="By the way, …">'+esc(ad.script||"")+'</textarea></div>'
     +'<div class="field"><label>Keywords (comma separated)</label><input type="text" id="f_keywords" value="'+esc((ad.keywords||[]).join(", "))+'" placeholder="software, app, cloud"></div>'
-    +'<div class="field"><label>Placement</label><select id="f_placement">'+opt("none","None &mdash; matched by keyword")+opt("start","Start of call")+opt("post_search","After web search")+'</select><div class="hint">Start &amp; after-search ads rotate evenly across all ads set to that trigger.</div></div>'
+    +'<div class="field"><label>Placement</label><select id="f_placement">'+opt("none","None &mdash; matched by keyword")+opt("start","Start of call")+opt("start_keyword","Start of call + keyword")+opt("post_search","After web search")+'</select><div class="hint">Start &amp; after-search ads rotate evenly across all ads set to that trigger.</div></div>'
     +'<div class="three"><div class="field"><label>Bid /1k</label><input type="number" step="0.01" id="f_bid" value="'+(ad.bid_cpm!=null?ad.bid_cpm:0)+'"></div>'
     +'<div class="field"><label>Daily cap</label><input type="number" id="f_cap" value="'+(ad.daily_cap!=null?ad.daily_cap:100)+'"></div>'
     +'<div class="field"><label>Weight</label><input type="number" step="0.1" id="f_weight" value="'+(ad.weight!=null?ad.weight:1)+'"></div></div>'
