@@ -472,8 +472,8 @@ def select_ad(session: Session) -> Optional[Dict[str, Any]]:
 
     candidates = []
     for ad in AD_DB:
-        if ad.get("placement", "none") != "none":
-            continue  # placement ads play at their trigger, not by keyword
+        if ad.get("placement", "none") not in ("none", "start_keyword"):
+            continue  # non-keyword placement ads play at their trigger, not by keyword
         if not ad["active"]:
             continue
         if play_counts[ad["id"]] >= ad["daily_cap"]:
@@ -600,7 +600,7 @@ def pick_start_script(ad):
 
 
 def pick_placement_ad(placement: str) -> Optional[Dict[str, Any]]:
-    pool = [a for a in AD_DB if a.get("active", True) and a.get("placement", "none") == placement]
+    pool = [a for a in AD_DB if a.get("active", True) and (a.get("placement", "none") == placement or (placement == "start" and a.get("placement", "none") == "start_keyword"))]
     if not pool:
         return None
     pool.sort(key=lambda a: a.get("id", ""))
