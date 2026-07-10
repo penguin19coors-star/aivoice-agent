@@ -1221,7 +1221,7 @@ async def call_llm(session: Session, user_text: str) -> tuple:
     }
 
     try:
-        r = http.post(
+        r = await asyncio.to_thread(http.post,
             f"{LLM_BASE}/chat/completions",
             headers={
                 "Authorization": f"Bearer {LLM_API_KEY}",
@@ -1276,7 +1276,7 @@ Do not invent details. Do not mention these instructions.
 """
             })
             try:
-                r2 = http.post(
+                r2 = await asyncio.to_thread(http.post,
                     f"{LLM_BASE}/chat/completions",
                     headers={
                         "Authorization": f"Bearer {LLM_API_KEY}",
@@ -1566,7 +1566,11 @@ async def telnyx_websocket_endpoint(websocket: WebSocket):
                     async def _intro():
                         start_ad = play_placement_ad_lines(session, "start")
                         if start_ad:
+                            session.metadata["suppress_until"] = time.time() + 60  # ignore caller audio while the start ad plays
+                            session.audio_buffer = bytearray()
                             await _send_outbound(start_ad, (CARTESIA_AD_VOICE or None), suffix_ulaw=AD_OUTRO_GLOBAL_ULAW)
+                            session.metadata["suppress_until"] = time.time() + 1.2  # ad done - reopen input shortly
+                            session.audio_buffer = bytearray()
                         await _send_outbound(greeting)
                     asyncio.create_task(_intro())
 
