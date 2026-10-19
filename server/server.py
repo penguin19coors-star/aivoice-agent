@@ -946,7 +946,10 @@ FREQUENCY = {
     "force_min_ads_after_seconds": int(os.environ.get("AD_FORCE_MIN_AFTER_SECONDS", "300")),  # 5 minutes
     "min_ads_target": int(os.environ.get("AD_MIN_ADS_TARGET", "1")),
 }
-CARTESIA_MODEL = os.environ.get("CARTESIA_MODEL", "sonic-2")
+# Cartesia sunsets every sonic-2 / sonic-turbo snapshot on 2026-10-20
+# (docs.cartesia.ai tts-models api-changes). Default to the pinned Sonic 3.6
+# snapshot, matching the CARTESIA_MODEL env value set in Render on 2026-10-19.
+CARTESIA_MODEL = os.environ.get("CARTESIA_MODEL", "sonic-3.6-2026-08-27")
 _resolved_voice: Optional[str] = None
 
 
@@ -1332,7 +1335,7 @@ async def tts_stream(reply_text: str, websocket: WebSocket):
         headers = {"xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json"}
         payload = {
             "text": text,
-            "model_id": "eleven_turbo_v2_5",
+            "model_id": "eleven_flash_v2_5",  # Turbo v2.5 is deprecated; Flash is its replacement
             "output_format": "pcm_8000",
         }
         with http.stream("POST", url, headers=headers, json=payload) as r:
